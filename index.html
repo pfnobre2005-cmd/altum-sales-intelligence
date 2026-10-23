@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>ALTUM Sales Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/styles.css">
+</head>
+<body>
+  <div class="demo-banner" role="status">
+    <strong>Protótipo · Etapa 1</strong> — todos os dados exibidos são <strong>FICTÍCIOS</strong>, gerados no seu navegador para teste. Nenhuma integração real está ativa.
+  </div>
+
+  <div class="app">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div><div class="brand-name">ALTUM</div><div class="brand-sub">Sales Intelligence</div></div>
+      </div>
+      <nav class="nav" id="nav" aria-label="Principal">
+        <a href="#/dashboard" data-route="dashboard">Dashboard</a>
+        <a href="#/clientes" data-route="clientes">Clientes</a>
+        <a href="#/recompra" data-route="recompra">Recompra</a>
+        <a href="#/funil" data-route="funil">Prospecção & funil</a>
+        <a href="#/campanhas" data-route="campanhas">Campanhas</a>
+        <a href="#/inteligencia" data-route="inteligencia">Inteligência</a>
+        <a href="#/configuracoes" data-route="configuracoes">Integrações & dados</a>
+      </nav>
+      <div class="sidebar-foot">
+        <label for="roleSel" class="small">Perfil (simulado até a Etapa 2)</label>
+        <select id="roleSel">
+          <option value="admin">Administrador</option>
+          <option value="operador">Operador</option>
+        </select>
+      </div>
+    </aside>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="menu-btn" id="menuBtn" aria-label="Abrir menu">☰</button>
+        <h1 id="pageTitle">Dashboard comercial</h1>
+        <span class="pill">Dados fictícios</span>
+      </header>
+      <main id="view" class="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <div id="modalRoot" class="modal-root"></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <noscript><p style="padding:24px">Ative o JavaScript para usar o ALTUM Sales Intelligence.</p></noscript>
+
+  <script src="assets/js/config.js"></script>
+  <script src="assets/js/mock-data.js"></script>
+  <script src="assets/js/store.js"></script>
+  <script src="assets/js/ui.js"></script>
+  <script src="assets/js/analytics.js"></script>
+  <script src="assets/js/compliance.js"></script>
+  <script src="assets/js/views/dashboard.js"></script>
+  <script src="assets/js/views/clientes.js"></script>
+  <script src="assets/js/views/recompra.js"></script>
+  <script src="assets/js/views/funil.js"></script>
+  <script src="assets/js/views/campanhas.js"></script>
+  <script src="assets/js/views/inteligencia.js"></script>
+  <script src="assets/js/views/configuracoes.js"></script>
+  <script src="assets/js/app.js"></script>
+</body>
+</html>
