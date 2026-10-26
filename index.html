@@ -4,18 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
+  <!-- nenhum endereço (com ou sem token) é enviado a outros sites -->
+  <meta name="referrer" content="no-referrer">
+  <!-- só scripts deste site; conexões só com o projeto Supabase; nada de scripts embutidos -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-elem 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https://abjnmqzzhsqirlsogwwd.supabase.co wss://abjnmqzzhsqirlsogwwd.supabase.co; base-uri 'none'; form-action 'none'; object-src 'none'">
   <title>ALTUM Sales Intelligence</title>
+  <!-- PRIMEIRO script: lê o token do link e o apaga do endereço antes de qualquer outro recurso -->
+  <script src="assets/js/link-auth.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="assets/css/styles.css">
 </head>
 <body>
-  <div class="demo-banner" role="status">
-    <strong>Protótipo · Etapa 1</strong> — todos os dados exibidos são <strong>FICTÍCIOS</strong>, gerados no seu navegador para teste. Nenhuma integração real está ativa.
+  <!-- Telas de acesso (login, definição de senha). As 7 telas ficam ocultas até a autenticação completa. -->
+  <div id="authRoot" class="auth-root" aria-live="polite"></div>
+
+  <div class="demo-banner" role="status" id="demoBanner" hidden>
+    <strong>Etapa 2</strong> — as telas usam dados <strong>FICTÍCIOS</strong>. Nenhuma integração com a loja está ativa.
   </div>
 
-  <div class="app">
+  <div class="app" id="appShell" hidden>
     <aside class="sidebar" id="sidebar">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">A</span>
@@ -30,13 +39,8 @@
         <a href="#/inteligencia" data-route="inteligencia">Inteligência</a>
         <a href="#/configuracoes" data-route="configuracoes">Integrações & dados</a>
       </nav>
-      <div class="sidebar-foot">
-        <label for="roleSel" class="small">Perfil (simulado até a Etapa 2)</label>
-        <select id="roleSel">
-          <option value="admin">Administrador</option>
-          <option value="operador">Operador</option>
-        </select>
-      </div>
+      <!-- usuário conectado e botão Sair: próximas etapas (perfil real vem do banco) -->
+      <div class="sidebar-foot" id="sessaoInfo"></div>
     </aside>
 
     <div class="main">
@@ -55,6 +59,7 @@
   <noscript><p style="padding:24px">Ative o JavaScript para usar o ALTUM Sales Intelligence.</p></noscript>
 
   <script src="assets/js/config.js"></script>
+  <script src="assets/vendor/supabase-js-2.117.3.js"></script>
   <script src="assets/js/mock-data.js"></script>
   <script src="assets/js/store.js"></script>
   <script src="assets/js/ui.js"></script>
@@ -68,5 +73,6 @@
   <script src="assets/js/views/inteligencia.js"></script>
   <script src="assets/js/views/configuracoes.js"></script>
   <script src="assets/js/app.js"></script>
+  <script src="assets/js/auth.js"></script>
 </body>
 </html>

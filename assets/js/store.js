@@ -14,10 +14,14 @@
     catch (e) { console.warn('Não foi possível salvar no navegador:', e); }
   }
 
+  // Perfil: NUNCA vem de seletor nem do navegador. Será lido do banco (tabela perfis)
+  // depois da autenticação completa (próxima etapa). Até lá: menor privilégio.
+  let papelAtual = 'operador';
   A.session = {
-    get role() { try { return localStorage.getItem('altum-si-role') || 'admin'; } catch (e) { return 'admin'; } },
-    set role(v) { try { localStorage.setItem('altum-si-role', v); } catch (e) { /* ignore */ } },
-    isAdmin() { return this.role === 'admin'; }
+    get role() { return papelAtual; },
+    isAdmin() { return papelAtual === 'admin'; },
+    // chamado somente pelo módulo de autenticação, com o papel lido do banco
+    definirPapel(papel) { papelAtual = papel === 'admin' ? 'admin' : 'operador'; }
   };
 
   A.store = {

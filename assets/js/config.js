@@ -1,19 +1,23 @@
 /* ALTUM Sales Intelligence — configuração
  * ---------------------------------------------------------------
- * Etapa 1: tudo roda no navegador com DADOS FICTÍCIOS.
- * Etapa 2: preencher supabase.url e supabase.publishableKey (sb_publishable_…,
- * pública por design; quem protege os dados é o Row Level Security).
- * NUNCA coloque aqui: token da Nuvemshop, secret key (sb_secret_…) / service_role do Supabase
- * ou qualquer outra credencial privada.
+ * Supabase: SOMENTE a Project URL e a chave publishable (sb_publishable_…).
+ * As duas são públicas por design; quem protege os dados é o Row Level Security
+ * do banco (migrações 001–010) e a verificação em 2 etapas.
+ * NUNCA coloque aqui: secret key (sb_secret_…), service_role, senha do banco,
+ * token da Nuvemshop ou qualquer outra credencial privada.
+ * Se a Project URL mudar, atualize também o Content-Security-Policy do index.html.
  */
 window.ALTUM = window.ALTUM || {};
 
 ALTUM.config = {
   appName: 'ALTUM Sales Intelligence',
-  version: '0.1.1-etapa1',
-  dataMode: 'demo',          // 'demo' (Etapa 1) | 'supabase' (Etapa 2)
+  version: '0.2.0-auth1',
+  dataMode: 'demo',          // telas ainda com dados fictícios do navegador (conexão ao banco: etapa futura)
   storageKey: 'altum-si-demo-v1',
-  supabase: { url: '', publishableKey: '' },
+  supabase: {
+    url: 'https://abjnmqzzhsqirlsogwwd.supabase.co',
+    publishableKey: 'sb_publishable_ow5h0Mto3_WMWpUaiqYwJg_8sBwMK5D'
+  },
   // Listas de domínio usadas pelas telas (independem da fonte de dados)
   leadOrigens: ['WhatsApp', 'Anúncio', 'Instagram', 'Indicação', 'B2B', 'Cadastro manual', 'Importação autorizada']
 };

@@ -27,11 +27,15 @@
     }
   };
 
-  function init() {
+  let iniciado = false;
+
+  // Chamado SOMENTE pelo módulo de autenticação, depois da autenticação completa.
+  function iniciar() {
+    if (iniciado) return;
+    iniciado = true;
+    document.getElementById('appShell').hidden = false;
+    document.getElementById('demoBanner').hidden = false;
     A.store.load();
-    const role = document.getElementById('roleSel');
-    role.value = A.session.role;
-    role.addEventListener('change', () => { A.session.role = role.value; A.ui.toast(`Perfil simulado: ${role.value === 'admin' ? 'Administrador' : 'Operador'}`); A.router.render(); });
 
     const sb = document.getElementById('sidebar');
     document.getElementById('menuBtn').addEventListener('click', () => sb.classList.toggle('open'));
@@ -40,5 +44,9 @@
     window.addEventListener('hashchange', () => { A.router.render(); window.scrollTo(0, 0); });
     A.router.render();
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+
+  A.app = {
+    iniciar,
+    get iniciado() { return iniciado; }
+  };
 })(window.ALTUM);
