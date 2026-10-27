@@ -14,17 +14,30 @@
     catch (e) { console.warn('Não foi possível salvar no navegador:', e); }
   }
 
-  // Perfil: NUNCA vem de seletor nem do navegador. Será lido do banco (tabela perfis)
-  // depois da autenticação completa (próxima etapa). Até lá: menor privilégio.
+  // Perfil: NUNCA vem de seletor nem do navegador. É lido do banco (tabela perfis)
+  // pelo módulo de autenticação, depois da verificação em 2 etapas (aal2).
+  // Até lá: menor privilégio. O papel só pode ser definido UMA vez por carregamento
+  // da página, e só por quem recebeu o "definidor" (app.js, no carregamento).
+  // Proteção de interface apenas: quem garante as permissões é o RLS do banco.
   let papelAtual = 'operador';
-  A.session = {
-    get role() { return papelAtual; },
-    isAdmin() { return papelAtual === 'admin'; },
-    // chamado somente pelo módulo de autenticação, com o papel lido do banco
-    definirPapel(papel) { papelAtual = papel === 'admin' ? 'admin' : 'operador'; }
+  let papelFixado = false;
+  let definidor = function (papel) {
+    if (papelFixado) return false;
+    papelFixado = true;
+    papelAtual = papel === 'admin' ? 'admin' : 'operador';
+    return true;
   };
+  Object.defineProperty(A, 'session', {
+    enumerable: true, configurable: false, writable: false,
+    value: Object.freeze({
+      get role() { return papelAtual; },
+      isAdmin() { return papelAtual === 'admin'; }
+    })
+  });
 
   A.store = {
+    // entregue uma única vez (para app.js, durante o carregamento da página)
+    entregarDefinidorDePapel() { const f = definidor; definidor = null; return f; },
     load() {
       try {
         const raw = localStorage.getItem(KEY);

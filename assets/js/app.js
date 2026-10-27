@@ -6,7 +6,7 @@
   A.router = {
     parse() {
       const parts = (location.hash || '#/dashboard').replace(/^#\/?/, '').split('/');
-      const name = A.views[parts[0]] ? parts[0] : 'dashboard';
+      const name = Object.prototype.hasOwnProperty.call(A.views, parts[0]) ? parts[0] : 'dashboard';
       return { name, param: parts[1] ? decodeURIComponent(parts[1]) : null };
     },
     render() {
@@ -28,10 +28,13 @@
   };
 
   let iniciado = false;
+  const definirPapel = A.store.entregarDefinidorDePapel();   // só app.js recebe
 
-  // Chamado SOMENTE pelo módulo de autenticação, depois da autenticação completa.
-  function iniciar() {
-    if (iniciado) return;
+  // Abre as 7 telas. Só o módulo de autenticação recebe esta função (uma única vez,
+  // no carregamento), depois de: senha + código do autenticador (aal2) + perfil ativo lido do banco.
+  function iniciar(perfil) {
+    if (iniciado || !perfil || !definirPapel) return false;
+    if (!definirPapel(perfil.papel)) return false;
     iniciado = true;
     document.getElementById('appShell').hidden = false;
     document.getElementById('demoBanner').hidden = false;
@@ -43,10 +46,12 @@
 
     window.addEventListener('hashchange', () => { A.router.render(); window.scrollTo(0, 0); });
     A.router.render();
+    return true;
   }
 
+  let iniciadorEntregue = false;
   A.app = {
-    iniciar,
+    entregarIniciador() { if (iniciadorEntregue) return null; iniciadorEntregue = true; return iniciar; },
     get iniciado() { return iniciado; }
   };
 })(window.ALTUM);

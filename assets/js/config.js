@@ -11,9 +11,10 @@ window.ALTUM = window.ALTUM || {};
 
 ALTUM.config = {
   appName: 'ALTUM Sales Intelligence',
-  version: '0.2.0-auth1',
+  version: '0.3.0-auth-mfa',
   dataMode: 'demo',          // telas ainda com dados fictícios do navegador (conexão ao banco: etapa futura)
   storageKey: 'altum-si-demo-v1',
+  inatividadeMinutos: 30,   // sessão encerrada após este tempo sem uso (também após recarregar a aba)
   supabase: {
     url: 'https://abjnmqzzhsqirlsogwwd.supabase.co',
     publishableKey: 'sb_publishable_ow5h0Mto3_WMWpUaiqYwJg_8sBwMK5D'
