@@ -191,7 +191,8 @@
   const BUCKET = 'produtos';
   const IMAGEM_MAX_BYTES = 1024 * 1024;
   const TIPOS_IMAGEM = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
-  const CODIGOS_DO_BANCO = { '22023': 'validacao', '23505': 'duplicado', 'PT409': 'conflito', 'P0002': 'nao_encontrado', '23503': 'historico' };
+  const CODIGOS_DO_BANCO = { '22023': 'validacao', '23505': 'duplicado', 'PT409': 'conflito', 'P0002': 'nao_encontrado', '23503': 'historico',
+                            'P0001': 'validacao', 'P0D01': 'possivel_duplicado' };
 
   // Erros das funções de gravação: as mensagens do banco já vêm em português e são exibidas como estão.
   function traduzirErroGravacao(error, oque) {
@@ -319,6 +320,220 @@
     return res;
   }
 
+  // ---------------------------------------------------------------
+  // Clientes (migração 012 + estruturas 003/004/005/007/008)
+  // ---------------------------------------------------------------
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const COLUNAS_RESUMO = 'id, nome, cidade, uf, origem, status_comercial, fonte, anonimizado, cadastrado_em, versao, tem_email, tem_telefone, '
+    + 'pedidos_pagos, total_pago, primeira_compra, ultima_compra, dias_sem_comprar, segmento, pode_whatsapp, pode_email';
+
+  // Restrição de gravação direta em tabela: mensagens técnicas viram texto claro
+  function erroDeGravacao(error, oque) {
+    if (error && error.code === '23514') return new ErroDados('validacao', `Dados inválidos para ${oque}. Confira os campos.`, error.code);
+    return traduzirErroGravacao(error, oque);
+  }
+  async function gravar(montar, oque) {
+    exigirCliente();
+    let r;
+    try { r = await montar(); } catch (e) { throw traduzirErro(e, oque); }
+    if (r.error) throw erroDeGravacao(r.error, oque);
+    return r.data;
+  }
+  async function lerUm(montar, oque) {
+    let r;
+    try { r = await montar(); } catch (e) { throw traduzirErro(e, oque); }
+    if (r.error) throw traduzirErro(r.error, oque);
+    return r.data;
+  }
+
+  // Texto de busca seguro para o filtro "or" do PostgREST (sem vírgula, parênteses, asterisco, dois-pontos)
+  function termoBusca(q) {
+    return String(q || '').replace(/[,()*:\\"]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80);
+  }
+
+  // E-mail completo ou telefone (≥ 8 dígitos): buscado no banco pela RPC, que devolve só IDs.
+  function pareceContato(q) {
+    const t = String(q || '').trim();
+    if (t.includes('@')) return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(t);
+    return /^[0-9()+\-.\s]+$/.test(t) && t.replace(/\D/g, '').length >= 8;
+  }
+  async function idsPorContato(q) {
+    const termo = String(q || '').trim().slice(0, 254);
+    if (!pareceContato(termo)) return [];
+    let r;
+    try { r = await sb.rpc('clientes_buscar_por_contato', { p_termo: termo }); } catch (e) { throw traduzirErro(e, 'a busca por contato'); }
+    if (r.error) throw traduzirErro(r.error, 'a busca por contato');
+    return (r.data || []).map(String).filter(x => UUID_RE.test(x)).slice(0, 50);
+  }
+
+  /** Lista paginada no servidor (v_clientes_resumo, security_invoker → RLS + 2 etapas).
+   *  A visão não tem e-mail/telefone: a busca por contato usa clientes_buscar_por_contato (só IDs). */
+  async function clientesListaComTotal(f) {
+    exigirCliente();
+    const origem = f.origem === 'ficticio' ? 'ficticio' : 'real';
+    const porPagina = Math.min(Math.max(Number(f.porPagina) || 25, 10), 100);
+    const pagina = Math.max(Number(f.pagina) || 1, 1);
+    const idsContato = await idsPorContato(f.q);
+    const montar = () => {
+      let q = sb.from('v_clientes_resumo').select(COLUNAS_RESUMO, { count: 'exact' });
+      q = filtrarOrigem(q, origem);
+      if (f.status) q = q.eq('status_comercial', f.status);
+      if (f.segmento) q = q.eq('segmento', f.segmento);
+      if (f.permissao === 'whatsapp') q = q.eq('pode_whatsapp', true);
+      if (f.permissao === 'email') q = q.eq('pode_email', true);
+      if (f.permissao === 'nenhuma') q = q.eq('pode_whatsapp', false).eq('pode_email', false);
+      if (f.anonimizados === 'sem') q = q.eq('anonimizado', false);
+      if (f.anonimizados === 'so') q = q.eq('anonimizado', true);
+      const t = termoBusca(f.q);
+      if (t) {
+        const partes = [`nome.ilike.*${t}*`, `cidade.ilike.*${t}*`];
+        if (idsContato.length) partes.push(`id.in.(${idsContato.join(',')})`);
+        q = q.or(partes.join(','));
+      }
+      if (f.ordem === 'ultima') q = q.order('ultima_compra', { ascending: false, nullsFirst: false });
+      else if (f.ordem === 'total') q = q.order('total_pago', { ascending: false });
+      else q = q.order('nome', { ascending: true, nullsFirst: false });
+      return q.order('id').range((pagina - 1) * porPagina, pagina * porPagina - 1);
+    };
+    const contarFicticios = async () => {
+      const r = await sb.from('clientes').select('id', { count: 'exact', head: true }).eq('fonte', 'ficticio');
+      if (r.error) throw traduzirErro(r.error, 'os dados de teste');
+      return r.count || 0;
+    };
+    let cfg, r, fic;
+    try {
+      [cfg, r, fic] = await Promise.all([
+        lerTudo(o => sb.from('configuracoes').select('id', o).order('id'), 'as configurações'), montar(), contarFicticios()]);
+    } catch (e) { throw e instanceof ErroDados ? e : traduzirErro(e, 'os clientes'); }
+    if (r.error) throw traduzirErro(r.error, 'os clientes');
+    if (cfg.length !== 1) throw new ErroDados('acesso', 'O banco não liberou a leitura dos dados. Saia e entre novamente com o código do autenticador.');
+    const itens = (r.data || []).map(x => ({
+      id: x.id, nome: x.nome, cidade: x.cidade, uf: x.uf, origem: x.origem, status: x.status_comercial, fonte: x.fonte,
+      anonimizado: x.anonimizado, cadastradoEm: x.cadastrado_em, temEmail: x.tem_email, temTelefone: x.tem_telefone,
+      pedidos: num(x.pedidos_pagos), total: num(x.total_pago), primeira: x.primeira_compra, ultima: x.ultima_compra,
+      diasSemComprar: x.dias_sem_comprar, segmento: x.segmento, podeWhatsapp: x.pode_whatsapp === true, podeEmail: x.pode_email === true
+    }));
+    if (itens.some(x => !daOrigem(x.fonte, origem))) throw new ErroDados('consulta', 'O banco devolveu clientes de outra origem. Nada foi exibido.');
+    return { itens, total: typeof r.count === 'number' ? r.count : itens.length, pagina, porPagina, origem, existemFicticios: fic > 0, lidoEm: new Date() };
+  }
+
+  /** Ficha completa de um cliente (todas as leituras respeitam o RLS). */
+  async function cliente(id) {
+    exigirCliente();
+    if (!UUID_RE.test(String(id || ''))) throw new ErroDados('nao_encontrado', 'Este endereço não corresponde a um cliente do Supabase (pode vir de uma tela que ainda usa a base local de teste).');
+    const [cfg, c, resumo, pedidos, permAtuais, permHist, oposicoes, interacoes, sugestoes, solicitacoes, textos] = await Promise.all([
+      lerTudo(o => sb.from('configuracoes').select('id', o).order('id'), 'as configurações'),
+      lerUm(() => sb.from('clientes').select('id, nome, email, telefone, cidade, uf, origem, status_comercial, fonte, anonimizado_em, cadastrado_em, versao, nuvemshop_cliente_id, grupo_pessoa_id').eq('id', id).maybeSingle(), 'o cliente'),
+      lerUm(() => sb.from('v_clientes_resumo').select(COLUNAS_RESUMO).eq('id', id).maybeSingle(), 'o resumo do cliente'),
+      lerTudo(o => sb.from('pedidos').select('id, numero, data_pedido, status, subtotal, desconto, frete, total, cupom_codigo, fonte, pedido_itens(id, produto_id, nome_produto, qtd, preco_unit)', o)
+        .eq('cliente_id', id).order('data_pedido', { ascending: false }).order('id'), 'os pedidos'),
+      lerTudo(o => sb.from('v_permissoes_atuais').select('canal, situacao, ocorrido_em, marketing_permitido', o).eq('cliente_id', id).order('canal'), 'as permissões'),
+      lerTudo(o => sb.from('permissoes_comunicacao').select('id, canal, situacao, como_obtida, meio_coleta, evidencia_ref, ocorrido_em, registrado_em, fonte', o)
+        .eq('cliente_id', id).order('ocorrido_em', { ascending: false }).order('seq', { ascending: false }), 'o histórico de permissões'),
+      lerTudo(o => sb.from('oposicoes').select('id, escopo, como_recebida, registrada_em, encerrada_em, motivo_encerramento', o).eq('cliente_id', id).order('registrada_em', { ascending: false }).order('id'), 'as oposições'),
+      lerTudo(o => sb.from('interacoes').select('id, data, canal, nota, fonte', o).eq('cliente_id', id).order('data', { ascending: false }).order('id'), 'as interações'),
+      lerTudo(o => sb.from('sugestoes_vinculo').select('id, tipo, cliente_id, cliente_b_id, lead_id, motivo, status, criado_em', o)
+        .eq('status', 'pendente').or(`cliente_id.eq.${id},cliente_b_id.eq.${id}`).order('criado_em').order('id'), 'as sugestões de vínculo'),
+      lerTudo(o => sb.from('solicitacoes_titular').select('id, protocolo, tipo, status, canal_recebimento, recebida_em, prazo_resposta_em, identidade_verificada', o)
+        .eq('cliente_id', id).order('recebida_em', { ascending: false }).order('id'), 'as solicitações LGPD'),
+      lerTudo(o => sb.from('textos_consentimento').select('id, versao, canal, vigente_desde, vigente_ate', o).is('vigente_ate', null).order('vigente_desde', { ascending: false }).order('id'), 'os textos de consentimento')
+    ]);
+    if (cfg.length !== 1) throw new ErroDados('acesso', 'O banco não liberou a leitura dos dados. Saia e entre novamente com o código do autenticador.');
+    if (!c) throw new ErroDados('nao_encontrado', 'Cliente não encontrado no Supabase.');
+    // nomes dos outros clientes das sugestões (só nome e cidade)
+    const outros = [...new Set(sugestoes.map(s => (s.cliente_id === id ? s.cliente_b_id : s.cliente_id)).filter(Boolean))];
+    const nomes = outros.length ? await lerUm(() => sb.from('clientes').select('id, nome, cidade, uf, fonte').in('id', outros), 'as sugestões de vínculo') : [];
+    const mapaNomes = new Map((nomes || []).map(x => [x.id, x]));
+    const ficticio = c.fonte === 'ficticio';
+    return {
+      lidoEm: new Date(),
+      cliente: {
+        id: c.id, nome: c.nome, email: c.email, telefone: c.telefone, cidade: c.cidade, uf: c.uf, origem: c.origem,
+        status: c.status_comercial, fonte: c.fonte, anonimizado: !!c.anonimizado_em, anonimizadoEm: c.anonimizado_em,
+        cadastradoEm: c.cadastrado_em, versao: num(c.versao), nuvemshopId: c.nuvemshop_cliente_id, grupo: c.grupo_pessoa_id
+      },
+      resumo: resumo ? { pedidos: num(resumo.pedidos_pagos), total: num(resumo.total_pago), primeira: resumo.primeira_compra, ultima: resumo.ultima_compra,
+                         diasSemComprar: resumo.dias_sem_comprar, segmento: resumo.segmento, podeWhatsapp: resumo.pode_whatsapp === true, podeEmail: resumo.pode_email === true } : null,
+      pedidos: pedidos.map(p => ({ id: p.id, numero: p.numero, data: p.data_pedido, status: p.status, total: num(p.total), subtotal: num(p.subtotal),
+                                   desconto: num(p.desconto), frete: num(p.frete), cupom: p.cupom_codigo, fonte: p.fonte,
+                                   foraDaOrigem: (p.fonte === 'ficticio') !== ficticio,
+                                   itens: (p.pedido_itens || []).map(i => ({ produtoId: i.produto_id, nome: i.nome_produto, qtd: num(i.qtd), preco: num(i.preco_unit) })) })),
+      permissoes: permAtuais, historicoPermissoes: permHist, oposicoes, interacoes, solicitacoes,
+      sugestoes: sugestoes.map(s => {
+        const outro = s.cliente_id === id ? s.cliente_b_id : s.cliente_id;
+        return { id: s.id, tipo: s.tipo, motivo: s.motivo, criadoEm: s.criado_em, lead: !!s.lead_id, outro: mapaNomes.get(outro) || null };
+      }),
+      // concessão real nunca aponta para texto de TESTE (bloquearia a remoção dos fictícios, 010)
+      textosVigentes: textos.filter(t => ficticio || !/^FICTICIO-/.test(t.versao))
+    };
+  }
+
+  function clienteSalvar(d) {
+    return rpc('cliente_salvar', {
+      p_id: d.id || null, p_versao: d.id ? d.versao : null, p_nome: d.nome, p_email: d.email || null, p_telefone: d.telefone || null,
+      p_cidade: d.cidade || null, p_uf: d.uf || null, p_origem: d.origem || null, p_status: d.status, p_confirmar_duplicado: !!d.confirmarDuplicado
+    }, 'o cliente');
+  }
+  async function clientesPossiveisDuplicados(d) {
+    const r = await rpc('clientes_possiveis_duplicados', { p_id: d.id || null, p_nome: d.nome || null, p_email: d.email || null, p_telefone: d.telefone || null, p_cidade: d.cidade || null }, 'os possíveis duplicados');
+    return Array.isArray(r) ? r : [];
+  }
+  function registrarPermissao(d) {
+    const linha = { cliente_id: d.clienteId, canal: d.canal, situacao: d.situacao, como_obtida: d.comoObtida };
+    if (d.meioColeta) linha.meio_coleta = d.meioColeta;
+    if (d.evidenciaRef) linha.evidencia_ref = d.evidenciaRef;
+    if (d.textoId) linha.texto_consentimento_id = d.textoId;
+    if (d.ocorridoEm) linha.ocorrido_em = d.ocorridoEm;
+    return gravar(() => sb.from('permissoes_comunicacao').insert(linha), 'a permissão');
+  }
+  function registrarOposicao(d) {
+    return gravar(() => sb.from('oposicoes').insert({ cliente_id: d.clienteId, escopo: d.escopo, como_recebida: d.comoRecebida }), 'a oposição');
+  }
+  function encerrarOposicao(id, motivo) {
+    return gravar(() => sb.from('oposicoes').update({ encerrada_em: new Date().toISOString(), motivo_encerramento: motivo }).eq('id', id).is('encerrada_em', null).select('id'), 'a oposição')
+      .then(r => { if (!r || !r.length) throw new ErroDados('permissao', 'A oposição não foi encerrada (só administrador com 2 etapas pode encerrar, e ela não pode já estar encerrada).'); return r; });
+  }
+  function registrarInteracao(d) {
+    const linha = { cliente_id: d.clienteId, canal: d.canal, nota: d.nota };
+    if (d.data) linha.data = d.data;
+    return gravar(() => sb.from('interacoes').insert(linha), 'a interação');
+  }
+  function registrarSolicitacao(d) {
+    const linha = { cliente_id: d.clienteId, tipo: d.tipo, canal_recebimento: d.canal };
+    if (d.contato) linha.contato_resposta = d.contato;
+    if (d.descricao) linha.descricao = d.descricao;
+    return gravar(() => sb.from('solicitacoes_titular').insert(linha).select('id, protocolo'), 'a solicitação');
+  }
+  function iniciarAtendimento(id, comoVerificada) {
+    const mud = { status: 'em_andamento' };
+    if (comoVerificada) { mud.identidade_verificada = true; mud.como_verificada = comoVerificada; }
+    return gravar(() => sb.from('solicitacoes_titular').update(mud).eq('id', id).eq('status', 'recebida').select('id, status'), 'a solicitação')
+      .then(r => { if (!r || !r.length) throw new ErroDados('permissao', 'A solicitação não foi atualizada (só administrador com 2 etapas trata solicitações, e ela precisa estar "recebida").'); return r; });
+  }
+  function cadastrarTextoConsentimento(d) {
+    const linha = { versao: d.versao, texto: d.texto, canal: d.canal || null };
+    if (d.vigenteDesde) linha.vigente_desde = d.vigenteDesde;
+    return gravar(() => sb.from('textos_consentimento').insert(linha).select('id'), 'o texto de consentimento')
+      .then(r => { if (!r || !r.length) throw new ErroDados('permissao', 'Só administrador com 2 etapas cadastra textos de consentimento.'); return r; });
+  }
+  function anonimizarSimular(clienteId, solicitacaoId) {
+    return rpc('anonimizar_titular', { p_cliente: clienteId, p_lead: null, p_origem: 'solicitacao', p_solicitacao: solicitacaoId, p_executar: false, p_confirmacao: null }, 'a anonimização');
+  }
+  function anonimizarExecutar(clienteId, solicitacaoId, confirmacao) {
+    return rpc('anonimizar_titular', { p_cliente: clienteId, p_lead: null, p_origem: 'solicitacao', p_solicitacao: solicitacaoId, p_executar: true, p_confirmacao: confirmacao }, 'a anonimização');
+  }
+  // Confirmação reforçada: novo código do autenticador (renova o horário do código no token — exigido pela 008)
+  async function reconfirmarCodigo(codigo) {
+    exigirCliente();
+    const f = await sb.auth.mfa.listFactors();
+    if (f.error) throw traduzirErro(f.error, 'o autenticador');
+    const totp = ((f.data && f.data.totp) || [])[0];
+    if (!totp) throw new ErroDados('permissao', 'Nenhum autenticador cadastrado nesta conta.');
+    const r = await sb.auth.mfa.challengeAndVerify({ factorId: totp.id, code: String(codigo || '').replace(/\D/g, '') });
+    if (r.error) throw new ErroDados('validacao', r.error.status === 429 ? 'Muitas tentativas. Aguarde alguns minutos.' : 'Código incorreto ou expirado. Digite o código atual do aplicativo.');
+    return true;
+  }
+
   let configuradorEntregue = false;
   A.repositorio = Object.freeze({
     ErroDados,
@@ -331,6 +546,20 @@
     validarImagem,
     urlImagemProduto,
     IMAGEM_MAX_BYTES,
+    clientesLista: clientesListaComTotal,
+    cliente,
+    clienteSalvar,
+    clientesPossiveisDuplicados,
+    registrarPermissao,
+    registrarOposicao,
+    encerrarOposicao,
+    registrarInteracao,
+    registrarSolicitacao,
+    iniciarAtendimento,
+    cadastrarTextoConsentimento,
+    anonimizarSimular,
+    anonimizarExecutar,
+    reconfirmarCodigo,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
     entregarConfigurador() {
       if (configuradorEntregue) return null;
