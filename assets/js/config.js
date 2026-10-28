@@ -5,14 +5,14 @@
  * do banco (migrações 001–010) e a verificação em 2 etapas.
  * NUNCA coloque aqui: secret key (sb_secret_…), service_role, senha do banco,
  * token da Nuvemshop ou qualquer outra credencial privada.
- * Se a Project URL mudar, atualize também o Content-Security-Policy do index.html.
+ * Se a Project URL mudar, atualize também o Content-Security-Policy do index.html (connect-src e img-src).
  */
 window.ALTUM = window.ALTUM || {};
 
 ALTUM.config = {
   appName: 'ALTUM Sales Intelligence',
-  version: '0.3.0-auth-mfa',
-  dataMode: 'demo',          // telas ainda com dados fictícios do navegador (conexão ao banco: etapa futura)
+  version: '0.5.0-produtos',
+  dataMode: 'misto',         // Produtos: Supabase · demais telas: base fictícia local (Dashboard: conexão preparada, aguardando)
   storageKey: 'altum-si-demo-v1',
   inatividadeMinutos: 30,   // sessão encerrada após este tempo sem uso (também após recarregar a aba)
   supabase: {

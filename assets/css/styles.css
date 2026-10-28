@@ -313,3 +313,42 @@ tr.clickable:hover td { background: var(--paper); }
 .sessao-nome { font-weight: 700; color: var(--ink); }
 .sessao-papel { display: inline-block; align-self: flex-start; font-size: .74rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: var(--sage-soft); color: var(--sage-dark); }
 #sessaoInfo .small { word-break: break-all; }
+
+/* Dashboard conectado ao Supabase */
+.fonte-dados { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; color: var(--ink-2); }
+.fonte-dados .btn { margin-left: auto; }
+.list .list-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid #F1ECE2; }
+.list li:last-child .list-item { border-bottom: 0; }
+
+/* Produtos */
+.fonte-acoes { margin-left: auto; display: inline-flex; gap: 8px; }
+.fonte-dados .fonte-acoes .btn { margin-left: 0; }
+.filtros-produtos { grid-template-columns: 2fr 1fr 1fr; }
+.prod-img { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); background: var(--white); }
+.prod-img-vazia { background: var(--sage-soft); color: var(--sage-dark); font-weight: 700; font-size: .78rem; }
+#tabelaProdutos tr.inativo td { color: var(--muted); }
+#tabelaProdutos tr.inativo .prod-img { opacity: .5; }
+#tabelaProdutos td.acoes { white-space: nowrap; text-align: right; }
+#tabelaProdutos td.acoes .btn + .btn { margin-left: 6px; }
+#tabelaProdutos code, .prod-campos code, .tabela-revisao code { white-space: nowrap; font-size: .8rem; background: var(--paper); padding: 1px 6px; border-radius: 6px; }
+.prod-detalhe { display: grid; grid-template-columns: 170px 1fr; gap: 18px; align-items: start; }
+.prod-detalhe .prod-img { width: 160px; height: 160px; font-size: 1.6rem; }
+.prod-campos { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+.prod-campos dt { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.prod-campos dd { margin: 2px 0 0; }
+.prod-imagem-campo { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.prod-imagem-campo legend { font-size: .8rem; font-weight: 600; color: var(--ink-2); padding: 0 4px; }
+.prod-imagem-linha { display: flex; gap: 12px; align-items: center; }
+.prod-imagem-linha .prod-img { width: 64px; height: 64px; }
+.erro-campo { color: var(--danger); font-size: .76rem; font-weight: 500; min-height: 0; }
+.erro-campo:empty { display: none; }
+.form input:disabled { background: var(--paper); color: var(--muted); }
+.tabela-revisao td.antes { color: var(--muted); text-decoration: line-through; }
+@media (max-width: 720px) {
+  .filtros-produtos { grid-template-columns: 1fr 1fr; }
+  .prod-detalhe { grid-template-columns: 1fr; }
+  .prod-campos { grid-template-columns: 1fr; }
+}
+#tabelaProdutos { min-width: 860px; }
+#tabelaProdutos td:nth-child(2) { min-width: 170px; }
+.dica-campo { font-weight: 400; font-size: .74rem; }

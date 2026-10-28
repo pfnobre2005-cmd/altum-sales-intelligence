@@ -7,7 +7,7 @@
   <!-- nenhum endereço (com ou sem token) é enviado a outros sites -->
   <meta name="referrer" content="no-referrer">
   <!-- só scripts deste site; conexões só com o projeto Supabase; nada de scripts embutidos -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-elem 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src https://abjnmqzzhsqirlsogwwd.supabase.co wss://abjnmqzzhsqirlsogwwd.supabase.co; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-elem 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://abjnmqzzhsqirlsogwwd.supabase.co; connect-src https://abjnmqzzhsqirlsogwwd.supabase.co wss://abjnmqzzhsqirlsogwwd.supabase.co; base-uri 'none'; form-action 'none'; object-src 'none'">
   <title>ALTUM Sales Intelligence</title>
   <!-- PRIMEIRO script: lê o token do link e o apaga do endereço antes de qualquer outro recurso -->
   <script src="assets/js/link-auth.js"></script>
@@ -21,7 +21,7 @@
   <div id="authRoot" class="auth-root" aria-live="polite"></div>
 
   <div class="demo-banner" role="status" id="demoBanner" hidden>
-    <strong>Etapa 2</strong> — acesso real (senha + 2 etapas), mas as telas ainda usam dados <strong>FICTÍCIOS</strong>. Nenhuma integração com a loja está ativa.
+    <strong>Etapa 2</strong> — Produtos: cadastro real no <strong>Supabase</strong>. Demais telas: dados <strong>FICTÍCIOS</strong> locais do navegador. Nenhuma integração com a loja está ativa.
   </div>
 
   <div class="app" id="appShell" hidden>
@@ -37,6 +37,7 @@
         <a href="#/funil" data-route="funil">Prospecção & funil</a>
         <a href="#/campanhas" data-route="campanhas">Campanhas</a>
         <a href="#/inteligencia" data-route="inteligencia">Inteligência</a>
+        <a href="#/produtos" data-route="produtos">Produtos</a>
         <a href="#/configuracoes" data-route="configuracoes">Integrações & dados</a>
       </nav>
       <!-- usuário conectado, papel (lido do banco) e botão Sair: preenchidos pelo auth.js -->
@@ -65,6 +66,7 @@
   <script src="assets/js/ui.js"></script>
   <script src="assets/js/analytics.js"></script>
   <script src="assets/js/compliance.js"></script>
+  <script src="assets/js/repositorio.js"></script>
   <script src="assets/js/views/dashboard.js"></script>
   <script src="assets/js/views/clientes.js"></script>
   <script src="assets/js/views/recompra.js"></script>
@@ -72,6 +74,7 @@
   <script src="assets/js/views/campanhas.js"></script>
   <script src="assets/js/views/inteligencia.js"></script>
   <script src="assets/js/views/configuracoes.js"></script>
+  <script src="assets/js/views/produtos.js"></script>
   <script src="assets/js/app.js"></script>
   <script src="assets/js/auth.js"></script>
 </body>

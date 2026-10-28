@@ -426,7 +426,7 @@
   }
 
   function liberarTelas(perfil, email) {
-    if (!iniciarApp || !iniciarApp({ papel: perfil.papel })) {
+    if (!iniciarApp || !iniciarApp({ papel: perfil.papel }, sb)) {
       return telaFalha('Recarregue a página para continuar.', email);
     }
     telasLiberadas = true;

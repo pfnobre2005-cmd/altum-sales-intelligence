@@ -13,6 +13,8 @@
       const { name, param } = this.parse();
       const v = A.views[name];
       document.getElementById('pageTitle').textContent = v.title;
+      const selo = document.querySelector('.topbar .pill');           // fonte dos dados da tela atual
+      if (selo) selo.textContent = v.fonteDados || 'Dados fictícios';
       document.title = `${v.title} · ALTUM Sales Intelligence`;
       document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.route === name));
       const root = view();
@@ -29,16 +31,18 @@
 
   let iniciado = false;
   const definirPapel = A.store.entregarDefinidorDePapel();   // só app.js recebe
+  const configurarBanco = A.repositorio.entregarConfigurador(); // idem: cliente Supabase da sessão
 
   // Abre as 7 telas. Só o módulo de autenticação recebe esta função (uma única vez,
   // no carregamento), depois de: senha + código do autenticador (aal2) + perfil ativo lido do banco.
-  function iniciar(perfil) {
-    if (iniciado || !perfil || !definirPapel) return false;
+  function iniciar(perfil, clienteSupabase) {
+    if (iniciado || !perfil || !definirPapel || !configurarBanco || !clienteSupabase) return false;
+    if (!configurarBanco(clienteSupabase)) return false;
     if (!definirPapel(perfil.papel)) return false;
     iniciado = true;
     document.getElementById('appShell').hidden = false;
     document.getElementById('demoBanner').hidden = false;
-    A.store.load();
+    A.store.load();          // base fictícia LOCAL: usada só pelas 6 telas ainda não conectadas ao banco
 
     const sb = document.getElementById('sidebar');
     document.getElementById('menuBtn').addEventListener('click', () => sb.classList.toggle('open'));
