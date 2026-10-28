@@ -352,3 +352,11 @@ tr.clickable:hover td { background: var(--paper); }
 #tabelaProdutos { min-width: 860px; }
 #tabelaProdutos td:nth-child(2) { min-width: 170px; }
 .dica-campo { font-weight: 400; font-size: .74rem; }
+
+/* Dashboard: origem dos dados */
+div.fonte-dados { margin: 0 0 12px; }
+.seletor-origem button { font-size: .8rem; padding: 6px 12px; }
+.aviso-ficticio { background: var(--warn-soft); color: var(--warn); border: 1px solid currentColor; border-radius: 12px; padding: 10px 14px; margin: 0 0 14px; font-size: .86rem; }
+.aviso-inconsistencia { border-color: var(--warn); color: var(--warn); font-size: .86rem; padding: 10px 14px; margin-bottom: 12px; }
+.estado-vazio h2 { font-family: var(--serif); font-weight: 500; }
+.estado-vazio p { max-width: 640px; }

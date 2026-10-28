@@ -71,38 +71,63 @@
   }
   const num = v => (v === null || v === undefined ? 0 : Number(v));
 
+  // Origem dos registros (coluna "fonte" de clientes, pedidos, leads e produtos).
+  // "real" = manual + nuvemshop + importacao · "ficticio" = carga de teste da migração 010.
+  // As duas NUNCA se misturam num mesmo cálculo.
+  const ORIGENS_DASHBOARD = ['real', 'ficticio'];
+  const filtrarOrigem = (q, origem) => (origem === 'ficticio' ? q.eq('fonte', 'ficticio') : q.neq('fonte', 'ficticio'));
+  const daOrigem = (fonte, origem) => (origem === 'ficticio' ? fonte === 'ficticio' : fonte !== 'ficticio');
+
   /**
-   * Dados do Dashboard comercial, todos do Supabase.
-   * Devolve uma "base" no mesmo formato que A.analytics usa, mais as oportunidades
-   * de recompra calculadas pela visão v_oportunidades_recompra (regras da migração 006).
+   * Dados do Dashboard comercial, todos do Supabase, de UMA origem (real ou fictícia).
+   * Devolve a "base" no formato de A.analytics + oportunidades de recompra da visão
+   * v_oportunidades_recompra (regras da 006/011: só produto ativo, sem anonimizados).
    */
-  async function dashboard() {
+  async function dashboard(origem) {
     exigirCliente();
+    if (!ORIGENS_DASHBOARD.includes(origem)) throw new ErroDados('consulta', 'Origem de dados inválida.');
     const hoje = A.analytics.iso(A.analytics.today());
 
-    const [cfg, clientes, pedidos, leads, oportunidades] = await Promise.all([
+    const [cfg, clientes, pedidos, leads, oportunidades, produtos, ficticios] = await Promise.all([
       lerTudo(o => sb.from('configuracoes')
         .select('id, inativo_apos_dias, fidelidade_min_pedidos, janela_antes_dias, janela_depois_dias', o).order('id'), 'as configurações'),
-      lerTudo(o => sb.from('clientes')
-        .select('id, nome, origem, cadastrado_em, status_comercial, anonimizado_em', o).order('id'), 'os clientes'),
-      lerTudo(o => sb.from('pedidos')
-        .select('id, cliente_id, data_pedido, status, total, cupom_codigo', o).eq('status', 'pago').order('id'), 'os pedidos'),
-      lerTudo(o => sb.from('leads')
-        .select('id, nome, empresa, origem, etapa, proximo_contato', o)
+      lerTudo(o => filtrarOrigem(sb.from('clientes')
+        .select('id, nome, origem, cadastrado_em, status_comercial, anonimizado_em, fonte', o), origem).order('id'), 'os clientes'),
+      lerTudo(o => filtrarOrigem(sb.from('pedidos')
+        .select('id, cliente_id, data_pedido, status, total, cupom_codigo, fonte', o).eq('status', 'pago'), origem).order('id'), 'os pedidos'),
+      lerTudo(o => filtrarOrigem(sb.from('leads')
+        .select('id, nome, empresa, origem, etapa, proximo_contato, fonte', o)
         .is('anonimizado_em', null).not('etapa', 'in', '(comprou,perdido)')
-        .not('proximo_contato', 'is', null).lte('proximo_contato', hoje).order('id'), 'os follow-ups do funil'),
+        .not('proximo_contato', 'is', null).lte('proximo_contato', hoje), origem).order('id'), 'os follow-ups do funil'),
       lerTudo(o => sb.from('v_oportunidades_recompra')
         .select('cliente_id, produto_id, produto, reposicao_estimada, dias_apos_estimativa, situacao, pode_whatsapp, pode_email', o)
-        .eq('situacao', 'janela').order('cliente_id').order('produto_id'), 'as oportunidades de recompra')
+        .eq('situacao', 'janela').order('cliente_id').order('produto_id'), 'as oportunidades de recompra'),
+      lerTudo(o => sb.from('produtos').select('id, fonte', o).order('id'), 'os produtos'),
+      (async () => {
+        let r;
+        try { r = await sb.from('clientes').select('id', { count: 'exact', head: true }).eq('fonte', 'ficticio'); }
+        catch (e) { throw traduzirErro(e, 'os dados de teste'); }
+        if (r.error) throw traduzirErro(r.error, 'os dados de teste');
+        return r.count || 0;
+      })()
     ]);
 
     // Sem a linha única de configurações, o RLS não liberou o acesso (sem aal2 ou perfil inativo)
     if (cfg.length !== 1) {
       throw new ErroDados('acesso', 'O banco não liberou a leitura dos dados. Saia e entre novamente com o código do autenticador.');
     }
+    // Conferência defensiva: o filtro foi feito no banco; nada de outra origem passa daqui.
+    if ([clientes, pedidos, leads].some(l => l.some(x => !daOrigem(x.fonte, origem)))) {
+      throw new ErroDados('consulta', 'O banco devolveu registros de outra origem. Nenhum número foi exibido.');
+    }
     const c = cfg[0];
+    const idsClientes = new Set(clientes.map(x => x.id));
+    // Pedido desta origem ligado a cliente de OUTRA origem: fica fora de todos os indicadores e é informado.
+    const pedidosValidos = pedidos.filter(p => idsClientes.has(p.cliente_id));
+    const pedidosForaDaOrigem = pedidos.length - pedidosValidos.length;
+
     const base = {
-      fonte: 'supabase',
+      fonte: 'supabase', origem,
       regras: {
         inativoAposDias: c.inativo_apos_dias,
         fidelidadeMinPedidos: c.fidelidade_min_pedidos,
@@ -111,14 +136,14 @@
       },
       clientes: clientes.map(x => ({
         id: x.id,
-        nome: x.nome,
+        nome: x.anonimizado_em ? null : x.nome,          // anonimizado: nenhum dado pessoal (o banco já guarda nulo)
         origem: x.origem,
         criadoEm: diaLocal(x.cadastrado_em),
         statusComercial: x.status_comercial,
         anonimizado: !!x.anonimizado_em,
         consentimento: {}
       })),
-      pedidos: pedidos.map(p => ({
+      pedidos: pedidosValidos.map(p => ({
         id: p.id, clienteId: p.cliente_id, data: diaLocal(p.data_pedido), status: p.status,
         total: num(p.total), cupom: p.cupom_codigo, itens: []       // itens não são usados pelos indicadores do Dashboard
       })),
@@ -129,13 +154,15 @@
       campanhas: []
     };
 
-    // Recompra: uma linha por cliente (o produto com a reposição mais adiantada na janela),
-    // excluindo "não contatar". Permissões de contato = regra real do banco (app.marketing_permitido).
+    // Recompra: só clientes e produtos desta origem; uma linha por cliente (reposição mais adiantada
+    // na janela); fora "não contatar" e anonimizados. Ícones = regra real do banco (app.marketing_permitido).
+    const fonteProduto = new Map(produtos.map(p => [p.id, p.fonte]));
     const porId = new Map(base.clientes.map(x => [x.id, x]));
     const melhor = new Map();
     oportunidades.forEach(o => {
       const cli = porId.get(o.cliente_id);
       if (!cli || cli.anonimizado || cli.statusComercial === 'nao_contatar') return;
+      if (!fonteProduto.has(o.produto_id) || !daOrigem(fonteProduto.get(o.produto_id), origem)) return;
       const atual = melhor.get(o.cliente_id);
       if (!atual || o.dias_apos_estimativa < atual.delta) {
         melhor.set(o.cliente_id, {
@@ -150,7 +177,12 @@
     });
     const janela = [...melhor.values()].sort((a, b) => a.delta - b.delta || String(a.cliente.nome).localeCompare(String(b.cliente.nome)));
 
-    return { base, janela, lidoEm: new Date() };
+    return {
+      origem, base, janela, lidoEm: new Date(),
+      vazio: clientes.length === 0 && pedidos.length === 0 && leads.length === 0,
+      pedidosForaDaOrigem,
+      existemFicticios: ficticios > 0
+    };
   }
 
   // ---------------------------------------------------------------
