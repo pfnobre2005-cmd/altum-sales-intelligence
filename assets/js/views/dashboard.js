@@ -168,7 +168,8 @@
             <li><div class="list-item">
               <div><strong>${ui.esc(o.cliente.nome)}</strong><small>${ui.esc(o.produto.nome)} · reposição estimada ${ui.date(o.estimada)}</small></div>
               <div class="list-right">${ui.consentIcons(o.cliente)}</div></div></li>`).join('')}</ul>
-            <p class="small muted">Ícones: permissão atual de marketing no banco (consentimento, oposições e supressões). Produtos desativados e clientes "não contatar" não entram.</p>`
+            <p class="small muted">Ícones: permissão atual de marketing no banco (consentimento, oposições e supressões). Produtos desativados e clientes "não contatar" não entram.</p>
+            <p class="small"><a href="#/recompra" class="link" id="verRecompra">Ver todas as oportunidades na Tela Recompra →</a></p>`
           : ui.empty('Nenhum cliente na janela agora.')}
         </article>
       </section>
@@ -181,7 +182,7 @@
           <td>${ui.date(l.proximoContato)} ${l.proximoContato < an.iso(an.today()) ? ui.badge('atrasado', 'warn') : ui.badge('hoje', 'sage')}</td></tr>`).join('')}
         </tbody></table></div>` : ui.empty('Nenhum follow-up pendente.')}
       </section>
-      <p class="small muted">Recompra e Funil ainda usam a base local; os atalhos para essas telas voltam quando elas forem conectadas ao banco.</p>`;
+      <p class="small muted">O Funil ainda usa a base local; o atalho para ele volta quando a tela for conectada ao banco.</p>`;
   }
 
   function trocarOrigem(o) {

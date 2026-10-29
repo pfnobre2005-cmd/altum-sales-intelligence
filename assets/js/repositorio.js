@@ -1,6 +1,6 @@
 /* ALTUM Sales Intelligence — leitura de dados no Supabase
  * ---------------------------------------------------------------
- * Fonte ÚNICA das telas já conectadas ao banco (Produtos; Dashboard preparado).
+ * Fonte ÚNICA das telas já conectadas ao banco (Dashboard, Clientes, Produtos e Recompra).
  * Nunca lê nem grava o localStorage: os dados do Supabase não se misturam
  * com a base fictícia local que as demais telas ainda usam.
  *
@@ -534,6 +534,156 @@
     return true;
   }
 
+  // ---------------------------------------------------------------
+  // Recompra (migração 013): v_recompra_painel + recompra_registrar
+  //   A visão não tem e-mail/telefone. O contato só é lido sob demanda, para
+  //   os canais com permissão atual (ver recompraContato).
+  // ---------------------------------------------------------------
+  const COLUNAS_PAINEL = 'cliente_id, cliente_nome, cliente_fonte, status_comercial, produto_id, produto, produto_sku, ultima_compra, qtd, '
+    + 'compras_do_produto, ciclo_recompra_dias, reposicao_estimada, dias_restantes, dias_sem_comprar, ultima_compra_cliente, situacao, '
+    + 'pode_whatsapp, pode_email, pode_contatar, acompanhamento, ultimo_acompanhamento_id, ultimo_resultado, ultimo_acompanhamento_em, '
+    + 'proxima_acao, proxima_acao_em, acompanhamentos';
+  const SITUACOES_RECOMPRA = ['janela', 'atrasado', 'antes_da_janela', 'inativo'];
+  const ACOMP_RECOMPRA = ['sem_acompanhamento', 'agendada', 'vencida', 'encerrada'];
+  const DATA_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const filtrarOrigemCliente = (q, origem) => (origem === 'ficticio' ? q.eq('cliente_fonte', 'ficticio') : q.neq('cliente_fonte', 'ficticio'));
+
+  function mapearOportunidade(x) {
+    return {
+      clienteId: x.cliente_id, cliente: x.cliente_nome, fonte: x.cliente_fonte, statusComercial: x.status_comercial,
+      produtoId: x.produto_id, produto: x.produto, sku: x.produto_sku,
+      ultimaCompra: x.ultima_compra, qtd: num(x.qtd), compras: num(x.compras_do_produto), ciclo: num(x.ciclo_recompra_dias),
+      estimada: x.reposicao_estimada, diasRestantes: num(x.dias_restantes), diasSemComprar: num(x.dias_sem_comprar),
+      ultimaCompraCliente: x.ultima_compra_cliente, situacao: x.situacao,
+      podeWhatsapp: x.pode_whatsapp === true, podeEmail: x.pode_email === true, podeContatar: x.pode_contatar === true,
+      acompanhamento: x.acompanhamento, ultimoId: x.ultimo_acompanhamento_id || null, ultimoResultado: x.ultimo_resultado,
+      ultimoEm: x.ultimo_acompanhamento_em, proximaAcao: x.proxima_acao, proximaAcaoEm: x.proxima_acao_em,
+      acompanhamentos: num(x.acompanhamentos)
+    };
+  }
+
+  // Aplica os filtros da tela (todos no servidor). "sem" = nomes de filtros a ignorar (usado nos contadores).
+  function filtrarRecompra(q, f, sem) {
+    const ign = new Set(sem || []);
+    q = filtrarOrigemCliente(q, f.origem === 'ficticio' ? 'ficticio' : 'real');
+    if (!ign.has('situacao') && SITUACOES_RECOMPRA.includes(f.situacao)) q = q.eq('situacao', f.situacao);
+    if (!ign.has('acompanhamento')) {
+      if (f.acompanhamento === 'abertas' || !f.acompanhamento) q = q.neq('acompanhamento', 'encerrada');
+      else if (ACOMP_RECOMPRA.includes(f.acompanhamento)) q = q.eq('acompanhamento', f.acompanhamento);
+    }
+    if (UUID_RE.test(String(f.produto || ''))) q = q.eq('produto_id', f.produto);
+    if (f.contato === 'whatsapp') q = q.eq('pode_whatsapp', true);
+    else if (f.contato === 'email') q = q.eq('pode_email', true);
+    else if (f.contato === 'algum') q = q.eq('pode_contatar', true);
+    else if (f.contato === 'nenhum') q = q.eq('pode_contatar', false);
+    if (DATA_RE.test(String(f.de || ''))) q = q.gte('reposicao_estimada', f.de);
+    if (DATA_RE.test(String(f.ate || ''))) q = q.lte('reposicao_estimada', f.ate);
+    const t = termoBusca(f.q);
+    if (t) q = q.ilike('cliente_nome', `*${t}*`);
+    return q;
+  }
+
+  async function contar(montar, oque) {
+    let r;
+    try { r = await montar(); } catch (e) { throw traduzirErro(e, oque); }
+    if (r.error) throw traduzirErro(r.error, oque);
+    return typeof r.count === 'number' ? r.count : 0;
+  }
+
+  /** Lista paginada no servidor + contadores por situação (mesmos filtros, exceto situação). */
+  async function recompraLista(f) {
+    exigirCliente();
+    const origem = f.origem === 'ficticio' ? 'ficticio' : 'real';
+    const porPagina = Math.min(Math.max(Number(f.porPagina) || 25, 10), 100);
+    const pagina = Math.max(Number(f.pagina) || 1, 1);
+    if (f.de && f.ate && DATA_RE.test(f.de) && DATA_RE.test(f.ate) && f.de > f.ate)
+      throw new ErroDados('validacao', 'Período inválido: a data inicial é posterior à final.');
+    const ff = Object.assign({}, f, { origem });
+    const montar = () => {
+      let q = filtrarRecompra(sb.from('v_recompra_painel').select(COLUNAS_PAINEL, { count: 'exact' }), ff);
+      if (f.ordem === 'cliente') q = q.order('cliente_nome', { ascending: true, nullsFirst: false });
+      else if (f.ordem === 'proxima') q = q.order('proxima_acao_em', { ascending: true, nullsFirst: false }).order('reposicao_estimada');
+      else if (f.ordem === 'ultima') q = q.order('ultima_compra', { ascending: false });
+      else q = q.order('reposicao_estimada', { ascending: true });
+      return q.order('cliente_id').order('produto_id').range((pagina - 1) * porPagina, pagina * porPagina - 1);
+    };
+    const contadores = SITUACOES_RECOMPRA.map(s => contar(() =>
+      filtrarRecompra(sb.from('v_recompra_painel').select('cliente_id', { count: 'exact', head: true }), Object.assign({}, ff, { situacao: s }), []), 'os contadores'));
+    const vencidas = contar(() => filtrarRecompra(sb.from('v_recompra_painel').select('cliente_id', { count: 'exact', head: true }),
+      Object.assign({}, ff, { situacao: '', acompanhamento: 'vencida' }), []), 'os contadores');
+    let cfg, r, cont, venc, fic;
+    try {
+      [cfg, r, cont, venc, fic] = await Promise.all([
+        lerTudo(o => sb.from('configuracoes').select('id, inativo_apos_dias, janela_antes_dias, janela_depois_dias', o).order('id'), 'as configurações'),
+        montar(), Promise.all(contadores), vencidas,
+        contar(() => sb.from('clientes').select('id', { count: 'exact', head: true }).eq('fonte', 'ficticio'), 'os dados de teste')
+      ]);
+    } catch (e) { throw e instanceof ErroDados ? e : traduzirErro(e, 'as oportunidades'); }
+    if (r.error) throw traduzirErro(r.error, 'as oportunidades');
+    if (cfg.length !== 1) throw new ErroDados('acesso', 'O banco não liberou a leitura dos dados. Saia e entre novamente com o código do autenticador.');
+    const itens = (r.data || []).map(mapearOportunidade);
+    if (itens.some(x => !daOrigem(x.fonte, origem))) throw new ErroDados('consulta', 'O banco devolveu oportunidades de outra origem. Nada foi exibido.');
+    return {
+      itens, total: typeof r.count === 'number' ? r.count : itens.length, pagina, porPagina, origem,
+      contagem: Object.fromEntries(SITUACOES_RECOMPRA.map((s, i) => [s, cont[i]])), vencidas: venc,
+      regras: { inativoAposDias: cfg[0].inativo_apos_dias, janelaAntesDias: cfg[0].janela_antes_dias, janelaDepoisDias: cfg[0].janela_depois_dias },
+      existemFicticios: fic > 0, lidoEm: new Date()
+    };
+  }
+
+  /** Produtos que geram recompra (ativos, com ciclo), da origem escolhida — para o filtro. */
+  async function recompraProdutos(origem) {
+    exigirCliente();
+    const l = await lerTudo(o => filtrarOrigem(sb.from('produtos').select('id, nome, sku, fonte', o), origem === 'ficticio' ? 'ficticio' : 'real')
+      .eq('ativo', true).not('ciclo_recompra_dias', 'is', null).order('nome').order('id'), 'os produtos');
+    return l.map(p => ({ id: p.id, nome: p.nome, sku: p.sku }));
+  }
+
+  /** Oportunidade atual + histórico (todos os ciclos) deste cliente × produto + últimas interações do cliente. */
+  async function recompraDetalhe(clienteId, produtoId) {
+    exigirCliente();
+    if (!UUID_RE.test(String(clienteId || '')) || !UUID_RE.test(String(produtoId || ''))) throw new ErroDados('nao_encontrado', 'Oportunidade inválida.');
+    const [op, hist, inter] = await Promise.all([
+      lerUm(() => sb.from('v_recompra_painel').select(COLUNAS_PAINEL).eq('cliente_id', clienteId).eq('produto_id', produtoId).maybeSingle(), 'a oportunidade'),
+      lerTudo(o => sb.from('recompra_acompanhamentos')
+        .select('id, compra_referencia, canal, iniciativa, resultado, proxima_acao, proxima_acao_em, criado_em, interacoes(nota)', o)
+        .eq('cliente_id', clienteId).eq('produto_id', produtoId).order('seq', { ascending: false }), 'o histórico de acompanhamento'),
+      lerUm(() => sb.from('interacoes').select('id, data, canal, nota, fonte').eq('cliente_id', clienteId)
+        .order('data', { ascending: false }).order('id').limit(10), 'as interações')
+    ]);
+    if (!op) throw new ErroDados('nao_encontrado', 'Esta oportunidade não está mais disponível (nova compra, produto desativado, oposição, "não contatar" ou anonimização).');
+    return {
+      oportunidade: mapearOportunidade(op),
+      historico: hist.map(h => ({
+        id: h.id, compraReferencia: h.compra_referencia, canal: h.canal, iniciativa: h.iniciativa, resultado: h.resultado,
+        proximaAcao: h.proxima_acao, proximaAcaoEm: h.proxima_acao_em, em: h.criado_em, nota: h.interacoes ? h.interacoes.nota : null
+      })),
+      interacoes: inter || [],
+      lidoEm: new Date()
+    };
+  }
+
+  /** Contato do cliente SÓ para os canais com permissão atual (minimização: nada é lido para canal bloqueado). */
+  async function recompraContato(clienteId, canais) {
+    exigirCliente();
+    if (!UUID_RE.test(String(clienteId || ''))) throw new ErroDados('nao_encontrado', 'Cliente inválido.');
+    const cols = ['id'];
+    if (canais.whatsapp) cols.push('telefone');
+    if (canais.email) cols.push('email');
+    if (cols.length === 1) return {};
+    const c = await lerUm(() => sb.from('clientes').select(cols.join(', ')).eq('id', clienteId).maybeSingle(), 'o contato');
+    if (!c) throw new ErroDados('nao_encontrado', 'Cliente não encontrado.');
+    return { telefone: canais.whatsapp ? c.telefone || null : undefined, email: canais.email ? c.email || null : undefined };
+  }
+
+  function recompraRegistrar(d) {
+    return rpc('recompra_registrar', {
+      p_cliente: d.clienteId, p_produto: d.produtoId, p_compra_referencia: d.compraReferencia,
+      p_canal: d.canal, p_iniciativa: d.iniciativa, p_resultado: d.resultado, p_nota: d.nota || null,
+      p_proxima_acao: d.proximaAcao || null, p_proxima_acao_em: d.proximaAcaoEm || null, p_ultimo_conhecido: d.ultimoConhecido || null
+    }, 'o acompanhamento');
+  }
+
   let configuradorEntregue = false;
   A.repositorio = Object.freeze({
     ErroDados,
@@ -560,6 +710,11 @@
     anonimizarSimular,
     anonimizarExecutar,
     reconfirmarCodigo,
+    recompraLista,
+    recompraProdutos,
+    recompraDetalhe,
+    recompraContato,
+    recompraRegistrar,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
     entregarConfigurador() {
       if (configuradorEntregue) return null;

@@ -377,3 +377,20 @@ details.historico summary { cursor: pointer; font-weight: 600; color: var(--ink-
 .aviso-inline { color: var(--warn); }
 @media (max-width: 1100px) { .filtros-clientes { grid-template-columns: 1fr 1fr 1fr; } .filtros-clientes input { grid-column: 1 / -1; } }
 @media (max-width: 720px) { .filtros-clientes { grid-template-columns: 1fr 1fr; } }
+
+/* Recompra (Supabase) */
+#cartoesRecompra { grid-template-columns: repeat(5, 1fr); margin-bottom: 14px; }
+.filtros-recompra { grid-template-columns: 2fr repeat(4, 1fr); align-items: end; }
+.filtros-recompra .periodo { display: flex; flex-direction: column; gap: 4px; color: var(--ink-2); }
+.resumo-recompra { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 16px; margin: 12px 0; }
+.resumo-recompra div { display: flex; flex-direction: column; gap: 2px; }
+.resumo-recompra dt { font-size: .76rem; color: var(--ink-2); }
+.resumo-recompra dd { margin: 0; font-size: .9rem; }
+.contato-recompra { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 8px 0; margin: 8px 0 12px; }
+#detalheRecompra h3 { font-size: .95rem; margin: 10px 0 6px; display: flex; gap: 8px; align-items: center; }
+.radio-row { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.radio-row legend { font-size: .86rem; margin-bottom: 4px; }
+.form .radio-row label, .radio-row label { display: inline-flex; flex-direction: row; gap: 6px; align-items: center; font-weight: 400; }
+.radio-row input[type=radio] { width: auto; margin: 0; }
+@media (max-width: 1100px) { #cartoesRecompra { grid-template-columns: repeat(3, 1fr); } .filtros-recompra { grid-template-columns: 1fr 1fr 1fr; } .filtros-recompra input[type=search] { grid-column: 1 / -1; } .resumo-recompra { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 720px) { #cartoesRecompra { grid-template-columns: 1fr 1fr; } .filtros-recompra { grid-template-columns: 1fr 1fr; } }
