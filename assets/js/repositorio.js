@@ -684,6 +684,77 @@
     }, 'o acompanhamento');
   }
 
+  // ---------------------------------------------------------------
+  // Nuvemshop — SOMENTE teste de conexão (Edge Function nuvemshop-consulta)
+  //   Usa o cliente da sessão (o token do usuário vai sozinho no cabeçalho).
+  //   Nada é gravado, importado ou sincronizado. Da resposta só sai um RESUMO:
+  //   quantidade de pedidos e contagem por status de pagamento. Nenhum outro
+  //   campo (cliente, e-mail, endereço, IDs) é guardado ou exibido; o corpo de
+  //   respostas de erro nunca é lido.
+  // ---------------------------------------------------------------
+  const FUNCAO_NUVEMSHOP = 'nuvemshop-consulta';
+  const STATUS_PAGAMENTO_RE = /^[a-z][a-z_ -]{0,29}$/i;
+
+  function resumirRespostaNuvemshop(bruto) {
+    let d = bruto;
+    if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = null; } }
+    if (!d || typeof d !== 'object') return { reconhecido: false, pedidos: null, status: [] };
+    const obj = Array.isArray(d) ? {} : d;
+    const lista = Array.isArray(d) ? d : [obj.pedidos, obj.orders, obj.data, obj.resultados, obj.items].find(Array.isArray) || null;
+    let pedidos = null;
+    for (const k of ['total_pedidos', 'quantidade_pedidos', 'quantidade', 'total', 'count']) {
+      if (Number.isInteger(obj[k]) && obj[k] >= 0) { pedidos = obj[k]; break; }
+    }
+    if (pedidos === null && lista) pedidos = lista.length;
+    const contagem = new Map();
+    const somar = (s, n) => { const k = STATUS_PAGAMENTO_RE.test(String(s)) ? String(s).toLowerCase() : 'outro'; contagem.set(k, (contagem.get(k) || 0) + n); };
+    const resumo = [obj.status_pagamento, obj.payment_status, obj.statusPagamento, obj.por_status_pagamento]
+      .find(x => x && typeof x === 'object' && !Array.isArray(x));
+    if (resumo) Object.entries(resumo).forEach(([s, n]) => { if (Number.isInteger(n) && n >= 0) somar(s, n); });
+    else if (lista) lista.forEach(o => {
+      const s = o && typeof o === 'object' ? (o.payment_status ?? o.status_pagamento ?? o.paymentStatus) : null;
+      if (typeof s === 'string' && s) somar(s, 1);
+    });
+    return { reconhecido: pedidos !== null || contagem.size > 0, pedidos, status: [...contagem.entries()].map(([status, n]) => ({ status, n })).sort((a, b) => b.n - a.n) };
+  }
+
+  function erroNuvemshop(error) {
+    const nome = (error && error.name) || '';
+    const st = error && error.context && typeof error.context.status === 'number' ? error.context.status : null;
+    if (nome === 'FunctionsFetchError') {
+      const abortado = /abort/i.test(String(error.context && (error.context.name || error.context.message) || ''));
+      return new ErroDados('rede', abortado ? 'A função não respondeu em 30 segundos. Tente de novo.' : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+    }
+    if (nome === 'FunctionsRelayError') return new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+    const msgs = {
+      401: 'Sessão não aceita pela função (401). Saia e entre novamente com o código do autenticador.',
+      403: 'Acesso negado (403). A função só atende administradores com verificação em 2 etapas — ou a Nuvemshop recusou a credencial configurada na função.',
+      404: 'Função "nuvemshop-consulta" não encontrada (404). Confira se ela está publicada no projeto.',
+      500: 'Erro interno na função (500). Consulte os registros (Logs) da função no painel do Supabase.',
+      502: 'A Nuvemshop não respondeu corretamente (502). Tente de novo em alguns minutos; se continuar, confira o token e o ID da loja nos segredos da função.'
+    };
+    if (st && msgs[st]) return new ErroDados(st === 401 ? 'sessao' : st === 403 ? 'permissao' : 'integracao', msgs[st], String(st));
+    return new ErroDados('integracao', st ? `A função respondeu com erro (código ${st}).` : 'Erro inesperado ao testar a conexão.', st ? String(st) : '');
+  }
+
+  /** Testa a conexão com a Nuvemshop (somente leitura). Só administrador com 2 etapas. */
+  async function testarNuvemshop() {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem testar a integração.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), 30000);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_NUVEMSHOP, { signal: ctrl.signal }); }
+    catch (e) { throw erroNuvemshop({ name: 'FunctionsFetchError', context: e }); }
+    finally { clearTimeout(prazo); }
+    if (r.error) throw erroNuvemshop(r.error);
+    return Object.assign(resumirRespostaNuvemshop(r.data), { em: new Date() });
+  }
+
   let configuradorEntregue = false;
   A.repositorio = Object.freeze({
     ErroDados,
@@ -715,6 +786,7 @@
     recompraDetalhe,
     recompraContato,
     recompraRegistrar,
+    testarNuvemshop,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
     entregarConfigurador() {
       if (configuradorEntregue) return null;
