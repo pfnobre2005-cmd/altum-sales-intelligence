@@ -109,6 +109,9 @@
 
   function hora(d) { return d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }); }
 
+  // importação da Nuvemshop concluída: descarta o que estava em memória (a próxima abertura relê o banco)
+  window.addEventListener('altum:dados-alterados', () => { estado.dados = null; });
+
   A.views.produtos = {
     title: 'Produtos',
     fonteDados: 'Supabase · cadastro real',

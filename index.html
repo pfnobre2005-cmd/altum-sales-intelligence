@@ -7,7 +7,7 @@
   <!-- nenhum endereço (com ou sem token) é enviado a outros sites -->
   <meta name="referrer" content="no-referrer">
   <!-- só scripts deste site; conexões só com o projeto Supabase; nada de scripts embutidos -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-elem 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://abjnmqzzhsqirlsogwwd.supabase.co; connect-src https://abjnmqzzhsqirlsogwwd.supabase.co wss://abjnmqzzhsqirlsogwwd.supabase.co; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; style-src-elem 'self' https://fonts.googleapis.com; style-src-attr 'unsafe-inline'; font-src https://fonts.gstatic.com; img-src 'self' data: blob: https://abjnmqzzhsqirlsogwwd.supabase.co https://*.mitiendanube.com https://*.nuvemshop.com.br; connect-src https://abjnmqzzhsqirlsogwwd.supabase.co wss://abjnmqzzhsqirlsogwwd.supabase.co; base-uri 'none'; form-action 'none'; object-src 'none'">
   <title>ALTUM Sales Intelligence</title>
   <!-- PRIMEIRO script: lê o token do link e o apaga do endereço antes de qualquer outro recurso -->
   <script src="assets/js/link-auth.js"></script>
@@ -21,7 +21,7 @@
   <div id="authRoot" class="auth-root" aria-live="polite"></div>
 
   <div class="demo-banner" role="status" id="demoBanner" hidden>
-    <strong>Etapa 2</strong> — Dashboard, Clientes, Produtos e Recompra: <strong>Supabase</strong>. Demais telas: dados <strong>FICTÍCIOS</strong> locais do navegador. Nenhuma integração com a loja está ativa.
+    <strong>Etapa 3</strong> — Dashboard, Clientes, Produtos e Recompra: <strong>Supabase</strong>, com importação da Nuvemshop pelo administrador (atualização automática desligada). Demais telas: dados <strong>FICTÍCIOS</strong> locais do navegador.
   </div>
 
   <div class="app" id="appShell" hidden>

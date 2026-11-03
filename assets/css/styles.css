@@ -399,3 +399,9 @@ details.historico summary { cursor: pointer; font-weight: 600; color: var(--ink-
 .nuvemshop-ok { margin-top: 12px; padding: 10px 14px; border: 1px solid var(--sage); border-radius: 12px; background: var(--sage-soft); }
 .nuvemshop-ok p { margin: 4px 0; }
 #secaoNuvemshop .auth-msg { margin-top: 12px; }
+
+/* Integrações: importação da Nuvemshop */
+.nuvemshop-previa { margin-top: 12px; padding: 10px 14px; border: 1px dashed var(--sand, #c9a96e); border-radius: 12px; background: var(--paper); }
+.nuvemshop-previa p, #nuvemshopSyncResultado p { margin: 4px 0; }
+.tabela-sync th[scope=row] { text-align: left; font-weight: 600; }
+#secaoNuvemshop .btn-row { margin-top: 12px; flex-wrap: wrap; }

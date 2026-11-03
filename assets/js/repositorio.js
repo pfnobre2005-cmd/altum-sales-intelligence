@@ -210,6 +210,13 @@
     return r.data;
   }
 
+  // Imagem vinda da Nuvemshop: só https dos domínios da loja (os mesmos liberados no CSP do index.html)
+  function urlImagemLoja(url) {
+    let u;
+    try { u = new URL(String(url || '')); } catch (e) { return null; }
+    return u.protocol === 'https:' && /(^|\.)(mitiendanube\.com|nuvemshop\.com\.br)$/.test(u.hostname) ? u.href : null;
+  }
+
   function urlImagemProduto(caminho) {
     if (!caminho || !/^[0-9a-f-]{36}\/[0-9a-f-]{36}\.(jpg|png|webp)$/.test(caminho)) return null;
     const base = (A.config && A.config.supabase && A.config.supabase.url) || '';
@@ -223,7 +230,7 @@
     const [cfg, lista, custos] = await Promise.all([
       lerTudo(o => sb.from('configuracoes').select('id', o).order('id'), 'as configurações'),
       lerTudo(o => sb.from('produtos')
-        .select('id, nome, sku, categoria, preco, ciclo_recompra_dias, ativo, fonte, imagem_path, nuvemshop_produto_id, nuvemshop_variante_id, sincronizado_em, versao, criado_em, atualizado_em', o)
+        .select('id, nome, sku, categoria, preco, ciclo_recompra_dias, ativo, fonte, imagem_path, nuvemshop_imagem_url, nuvemshop_produto_id, nuvemshop_variante_id, sincronizado_em, versao, criado_em, atualizado_em', o)
         .order('nome').order('id'), 'os produtos'),
       admin ? lerTudo(o => sb.from('produto_custos').select('produto_id, custo, atualizado_em', o).order('produto_id'), 'os custos') : Promise.resolve(null)
     ]);
@@ -239,7 +246,7 @@
         preco: p.preco === null ? null : num(p.preco),
         custo: mapaCustos ? (mapaCustos.has(p.id) ? mapaCustos.get(p.id) : null) : undefined,
         ciclo: p.ciclo_recompra_dias, ativo: p.ativo, fonte: p.fonte,
-        imagemPath: p.imagem_path, imagemUrl: urlImagemProduto(p.imagem_path),
+        imagemPath: p.imagem_path, imagemUrl: urlImagemProduto(p.imagem_path) || urlImagemLoja(p.nuvemshop_imagem_url),
         nuvemshopProdutoId: p.nuvemshop_produto_id, nuvemshopVarianteId: p.nuvemshop_variante_id,
         sincronizadoEm: p.sincronizado_em, versao: num(p.versao), criadoEm: p.criado_em, atualizadoEm: p.atualizado_em
       }))
@@ -755,6 +762,83 @@
     return Object.assign(resumirRespostaNuvemshop(r.data), { em: new Date() });
   }
 
+  // ---------------------------------------------------------------
+  // Nuvemshop — importação (Edge Function nuvemshop-sincronizar, migração 014)
+  //   Prévia (nada gravado) e execução. Só administrador com 2 etapas (o banco confere de novo).
+  //   O token da loja nunca passa pelo navegador. A resposta traz só contadores e avisos sem dado pessoal.
+  // ---------------------------------------------------------------
+  const FUNCAO_SINCRONIZAR = 'nuvemshop-sincronizar';
+  const MSG_SINCRONIZACAO = {
+    sessao_invalida: 'Sessão não aceita pela função. Saia e entre novamente com o código do autenticador.',
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas pode importar dados da loja.',
+    em_andamento: 'Já existe uma importação em andamento. Aguarde terminar e atualize o painel.',
+    modo_invalido: 'Pedido inválido para a função.',
+    configuracao_incompleta: 'A função não está configurada (segredos ausentes no Supabase). Nada foi importado.',
+    nuvemshop_credencial: 'A Nuvemshop recusou a credencial configurada na função (token ou permissões). Nada foi importado.',
+    nuvemshop_indisponivel: 'A Nuvemshop não respondeu corretamente agora. Nada foi importado; tente de novo em alguns minutos.',
+    nuvemshop_sem_resposta: 'A Nuvemshop não respondeu a tempo. Nada foi importado; tente de novo.',
+    nuvemshop_limite_de_chamadas: 'A Nuvemshop limitou as chamadas desta conta. Nada foi importado; tente de novo em alguns minutos.',
+    nuvemshop_nao_encontrado: 'A Nuvemshop não encontrou a loja ou o recurso pedido. Confira o ID da loja.',
+    nuvemshop_resposta_invalida: 'A Nuvemshop devolveu uma resposta inesperada. Nada foi importado.',
+    nuvemshop_link_invalido: 'A paginação da Nuvemshop apontou para outro endereço; a leitura foi interrompida por segurança. Nada foi importado.',
+    nuvemshop_volume_excessivo: 'Volume acima do limite de uma execução. Nada foi importado; fale com o suporte técnico.',
+    tempo_esgotado: 'A leitura da loja passou do tempo limite. Nada foi importado; tente de novo.',
+    banco_inicio: 'O banco não conseguiu iniciar a importação. Nada foi importado.',
+    banco_aplicar: 'O banco recusou a gravação. Nada foi importado.',
+    inesperado: 'Erro inesperado na função. Nada foi importado.'
+  };
+
+  async function exigirAdminMfa() {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem importar dados da loja.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+  }
+
+  /** modo: 'previa' (nada é gravado) ou 'execucao'. */
+  async function nuvemshopSincronizar(modo) {
+    if (!['previa', 'execucao'].includes(modo)) throw new ErroDados('validacao', 'Modo inválido.');
+    await exigirAdminMfa();
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), 170000);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_SINCRONIZAR, { body: { modo }, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') {
+        const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
+        throw new ErroDados('rede', abort
+          ? 'A importação passou de 170 segundos sem resposta. Atualize o painel: a execução pode ter terminado no servidor.'
+          : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+      }
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      let codigo = '', status = err.context && err.context.status;
+      try { const corpo = await err.context.json(); codigo = String((corpo && corpo.codigo) || ''); } catch (e) { codigo = ''; }
+      if (status === 404 && !codigo) throw new ErroDados('integracao', 'Função "nuvemshop-sincronizar" não encontrada. Confira se ela foi publicada.');
+      const msg = MSG_SINCRONIZACAO[codigo] || (/^nuvemshop_erro_\d+$/.test(codigo) ? `A Nuvemshop respondeu com erro (${codigo.slice(15)}). Nada foi importado.` : `A função respondeu com erro${status ? ` (${status})` : ''}. Nada foi importado.`);
+      throw new ErroDados(codigo === 'sem_permissao' ? 'permissao' : codigo === 'sessao_invalida' ? 'sessao' : codigo === 'em_andamento' ? 'conflito' : 'integracao', msg, codigo);
+    }
+    const d = r.data;
+    if (!d || typeof d !== 'object' || !d.contadores) throw new ErroDados('integracao', 'Resposta inesperada da função. Atualize o painel para conferir.');
+    if (modo === 'execucao') window.dispatchEvent(new CustomEvent('altum:dados-alterados', { detail: { origem: 'nuvemshop' } }));
+    return d;
+  }
+
+  /** Painel: estado da loja e últimas execuções (o banco só mostra a administradores com 2 etapas). */
+  async function nuvemshopPainel() {
+    exigirCliente();
+    const [est, ex] = await Promise.all([
+      lerUm(() => sb.from('nuvemshop_estado').select('loja_id, ultima_sincronizacao_em, ultima_execucao_id, agendamento_ativo, cursor_produtos, cursor_clientes, cursor_pedidos').limit(1), 'o estado da integração'),
+      lerUm(() => sb.from('nuvemshop_sincronizacoes').select('id, modo, status, incremental, iniciada_em, concluida_em, lidos, contadores, avisos, erro_codigo')
+        .order('iniciada_em', { ascending: false }).order('id').limit(10), 'o histórico de importações')
+    ]);
+    return { estado: (est && est[0]) || null, execucoes: ex || [], lidoEm: new Date() };
+  }
+
   let configuradorEntregue = false;
   A.repositorio = Object.freeze({
     ErroDados,
@@ -787,6 +871,9 @@
     recompraContato,
     recompraRegistrar,
     testarNuvemshop,
+    nuvemshopSincronizar,
+    nuvemshopPainel,
+    urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
     entregarConfigurador() {
       if (configuradorEntregue) return null;

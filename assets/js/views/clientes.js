@@ -626,6 +626,9 @@
   }
 
   // ---------- registro da tela ----------
+  // importação da Nuvemshop concluída: descarta o que estava em memória (a próxima abertura relê o banco)
+  window.addEventListener('altum:dados-alterados', () => { estado.lista = null; estado.ficha = null; });
+
   A.views.clientes = {
     title: 'Clientes',
     get fonteDados() {

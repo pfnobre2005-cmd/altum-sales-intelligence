@@ -191,6 +191,9 @@
     A.router.render();
   }
 
+  // importação da Nuvemshop concluída: descarta o que estava em memória (a próxima abertura relê o banco)
+  window.addEventListener('altum:dados-alterados', () => { estado.dados.real = null; estado.dados.ficticio = null; });
+
   A.views.dashboard = {
     title: 'Dashboard comercial',
     get fonteDados() { return estado.origem === 'ficticio' ? 'Dados FICTÍCIOS de teste' : 'Supabase · dados reais'; },
