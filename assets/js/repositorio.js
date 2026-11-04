@@ -968,6 +968,211 @@
   }
 
   // ---------------------------------------------------------------
+  // Campanhas (006 + 016): campanhas, destinatários (só pela função de inclusão, com a regra
+  //   única de permissão de marketing), envio MANUAL marcado e revalidado, aprovação humana
+  //   (administrador), resultados com atribuição SÓ com evidência (pedido pago da Nuvemshop,
+  //   com o cupom da campanha, depois do envio, na janela). Cupons: referência local do código
+  //   que já existe na loja (administrador). Nada é enviado nem alterado na Nuvemshop.
+  // ---------------------------------------------------------------
+  const COLUNAS_RESULTADO = 'campanha_id, nome, objetivo, canal, publico, status, cupom, aprovada_em, iniciada_em, concluida_em, meta_pedidos, meta_receita, '
+    + 'destinatarios, enviados, bloqueados, clientes_convertidos, pedidos_atribuidos, receita_atribuida, pedidos_com_produto_foco, '
+    + 'usos_cupom_total, usos_cupom_fora_do_publico, usos_cupom_atribuidos_a_outra_campanha, fonte, data_inicio, data_fim, janela_atribuicao_dias, pendentes';
+  const COLUNAS_CAMPANHA = 'id, nome, objetivo, canal, publico, cupom_id, mensagem, data_inicio, data_fim, janela_atribuicao_dias, meta_pedidos, meta_receita, '
+    + 'observacoes, status, resultado_notas, aprovada_por, aprovada_em, aprovacao_observacao, criada_por, criada_em, iniciada_em, concluida_em, atualizado_em, fonte';
+  const PUBLICOS_CAMPANHA = ['janela', 'atrasado', 'primeira_compra', 'recorrentes', 'fieis', 'inativos', 'selecao_manual'];
+  const CANAIS_CAMPANHA = ['whatsapp', 'email'];
+
+  function mapearResultado(r) {
+    const enviados = num(r.enviados), comp = num(r.clientes_convertidos);
+    return {
+      id: r.campanha_id, nome: r.nome, objetivo: r.objetivo, canal: r.canal, publico: r.publico, status: r.status, cupom: r.cupom,
+      aprovadaEm: r.aprovada_em, iniciadaEm: r.iniciada_em, concluidaEm: r.concluida_em, metaPedidos: r.meta_pedidos, metaReceita: r.meta_receita === null ? null : num(r.meta_receita),
+      destinatarios: num(r.destinatarios), enviados, bloqueados: num(r.bloqueados), pendentes: num(r.pendentes),
+      compradores: comp, pedidos: num(r.pedidos_atribuidos), receita: num(r.receita_atribuida), pedidosProdutoFoco: num(r.pedidos_com_produto_foco),
+      taxa: enviados ? comp / enviados : NaN,
+      usosCupom: r.usos_cupom_total === null ? null : num(r.usos_cupom_total),
+      usosForaDoPublico: r.usos_cupom_fora_do_publico === null ? null : num(r.usos_cupom_fora_do_publico),
+      usosOutraCampanha: r.usos_cupom_atribuidos_a_outra_campanha === null ? null : num(r.usos_cupom_atribuidos_a_outra_campanha),
+      fonte: r.fonte, dataInicio: r.data_inicio, dataFim: r.data_fim, janela: num(r.janela_atribuicao_dias)
+    };
+  }
+
+  /** Lista de campanhas de UMA origem, com os resultados calculados pelo banco. */
+  async function campanhasLista(origemPedida) {
+    exigirCliente();
+    const origem = origemPedida === 'ficticio' ? 'ficticio' : 'real';
+    let cfg, lista, fic;
+    try {
+      [cfg, lista, fic] = await Promise.all([
+        lerTudo(o => sb.from('configuracoes').select('id', o).order('id'), 'as configurações'),
+        lerTudo(o => filtrarOrigem(sb.from('v_campanhas_resultados').select(COLUNAS_RESULTADO, o), origem).order('campanha_id'), 'as campanhas'),
+        contar(() => sb.from('campanhas').select('id', { count: 'exact', head: true }).eq('fonte', 'ficticio'), 'os dados de teste')
+      ]);
+    } catch (e) { throw e instanceof ErroDados ? e : traduzirErro(e, 'as campanhas'); }
+    if (cfg.length !== 1) throw new ErroDados('acesso', MSG_SEM_ACESSO);
+    if (lista.some(x => !daOrigem(x.fonte, origem))) throw new ErroDados('consulta', 'O banco devolveu campanhas de outra origem. Nada foi exibido.');
+    const ordem = { andamento: 0, rascunho: 1, concluida: 2 };
+    const itens = lista.map(mapearResultado)
+      .sort((a, b) => (ordem[a.status] - ordem[b.status]) || String(b.iniciadaEm || '').localeCompare(String(a.iniciadaEm || '')) || a.nome.localeCompare(b.nome));
+    return { origem, itens, existemFicticios: fic > 0, lidoEm: new Date() };
+  }
+
+  /** Campanha completa: dados, resultado, destinatários (sem contato), pedidos atribuídos (evidência), cupom e produtos. */
+  async function campanhaDetalhe(id) {
+    exigirCliente();
+    if (!UUID_RE.test(String(id || ''))) throw new ErroDados('nao_encontrado', 'Este endereço não corresponde a uma campanha do Supabase (pode vir de uma tela que ainda usa a base local de teste).');
+    const [c, res, dest, atrib, prods, perfis] = await Promise.all([
+      lerUm(() => sb.from('campanhas').select(COLUNAS_CAMPANHA).eq('id', id).maybeSingle(), 'a campanha'),
+      lerUm(() => sb.from('v_campanhas_resultados').select(COLUNAS_RESULTADO).eq('campanha_id', id).maybeSingle(), 'o resultado da campanha'),
+      lerTudo(o => sb.from('v_campanha_destinatarios').select('id, cliente_id, nome, situacao, motivo_bloqueio, incluido_em, verificado_em, enviado_em, enviado_por, pode_enviar_agora', o)
+        .eq('campanha_id', id).order('nome', { nullsFirst: false }).order('id'), 'os destinatários'),
+      lerTudo(o => sb.from('v_atribuicao_pedidos').select('pedido_id, cliente_id, data_pedido, total, cupom_codigo, enviado_em', o)
+        .eq('campanha_id', id).order('data_pedido', { ascending: false }).order('pedido_id'), 'os pedidos atribuídos'),
+      lerTudo(o => sb.from('campanha_produtos').select('produto_id, produtos(nome, sku)', o).eq('campanha_id', id).order('produto_id'), 'os produtos da campanha'),
+      perfisVisiveis()
+    ]);
+    if (!c) throw new ErroDados('nao_encontrado', 'Campanha não encontrada.');
+    // consultas por lista de IDs em lotes (URL curta mesmo com campanhas grandes)
+    const emLotes = async (ids, montar, oque) => {
+      const unicos = [...new Set(ids)], saida = [];
+      for (let i = 0; i < unicos.length; i += 150) saida.push(...((await lerUm(() => montar(unicos.slice(i, i + 150)), oque)) || []));
+      return saida;
+    };
+    const [cupom, numeros, ultimas] = await Promise.all([
+      c.cupom_id ? lerUm(() => sb.from('cupons').select('id, codigo, tipo, valor, ativo, fonte').eq('id', c.cupom_id).maybeSingle(), 'o cupom') : Promise.resolve(null),
+      emLotes(atrib.map(a => a.pedido_id), l => sb.from('pedidos').select('id, numero, nuvemshop_pedido_id').in('id', l), 'os pedidos'),
+      emLotes(dest.map(d => d.cliente_id), l => sb.from('v_clientes_resumo').select('id, ultima_compra').in('id', l), 'as últimas compras')
+    ]);
+    const nomes = new Map(perfis.map(p => [p.id, p.nome]));
+    const quem = idp => (idp ? nomes.get(idp) || 'Outro usuário' : 'Sistema');
+    const nomeCli = new Map(dest.map(d => [d.cliente_id, d.nome]));
+    const numPed = new Map((numeros || []).map(p => [p.id, p.numero || (p.nuvemshop_pedido_id ? '#' + p.nuvemshop_pedido_id : '—')]));
+    const ultima = new Map((ultimas || []).map(u => [u.id, u.ultima_compra]));
+    return {
+      lidoEm: new Date(),
+      campanha: {
+        id: c.id, nome: c.nome, objetivo: c.objetivo, canal: c.canal, publico: c.publico, cupomId: c.cupom_id, mensagem: c.mensagem,
+        dataInicio: c.data_inicio, dataFim: c.data_fim, janela: c.janela_atribuicao_dias, metaPedidos: c.meta_pedidos, metaReceita: c.meta_receita === null ? null : num(c.meta_receita),
+        observacoes: c.observacoes, status: c.status, resultadoNotas: c.resultado_notas,
+        aprovadaPor: c.aprovada_por ? quem(c.aprovada_por) : null, aprovadaEm: c.aprovada_em, aprovacaoObservacao: c.aprovacao_observacao,
+        criadaPor: quem(c.criada_por), criadaEm: c.criada_em, iniciadaEm: c.iniciada_em, concluidaEm: c.concluida_em, atualizadoEm: c.atualizado_em, fonte: c.fonte
+      },
+      resultado: res ? mapearResultado(res) : null,
+      cupom: cupom ? { id: cupom.id, codigo: cupom.codigo, tipo: cupom.tipo, valor: cupom.valor === null ? null : num(cupom.valor), ativo: cupom.ativo, fonte: cupom.fonte } : null,
+      produtos: prods.map(p => ({ id: p.produto_id, nome: p.produtos ? p.produtos.nome : '—', sku: p.produtos ? p.produtos.sku : null })),
+      destinatarios: dest.map(d => ({ id: d.id, clienteId: d.cliente_id, nome: d.nome, situacao: d.situacao, motivo: d.motivo_bloqueio,
+                                     incluidoEm: d.incluido_em, verificadoEm: d.verificado_em, enviadoEm: d.enviado_em, enviadoPor: d.enviado_em ? quem(d.enviado_por) : null,
+                                     podeEnviar: d.pode_enviar_agora === true, ultimaCompra: ultima.get(d.cliente_id) || null })),
+      atribuidos: atrib.map(a => ({ pedidoId: a.pedido_id, numero: numPed.get(a.pedido_id) || '—', cliente: nomeCli.get(a.cliente_id) || '—', clienteId: a.cliente_id,
+                                    data: a.data_pedido, total: num(a.total), cupom: a.cupom_codigo, enviadoEm: a.enviado_em }))
+    };
+  }
+
+  /** Contato SÓ dos destinatários pendentes que podem receber agora, e só do canal da campanha (minimização). */
+  async function campanhaContatos(campanhaId, canal) {
+    exigirCliente();
+    if (!UUID_RE.test(String(campanhaId || '')) || !CANAIS_CAMPANHA.includes(canal)) return {};
+    const col = canal === 'email' ? 'email' : 'telefone';
+    const r = await lerTudo(o => sb.from('v_campanha_destinatarios').select(`id, ${col}`, o).eq('campanha_id', campanhaId)
+      .eq('situacao', 'pendente').eq('pode_enviar_agora', true).order('id'), 'os contatos');
+    return Object.fromEntries(r.map(x => [x.id, x[col] || null]));
+  }
+
+  function linhaCampanha(d) {
+    const l = {};
+    const set = (k, v) => { if (v !== undefined) l[k] = typeof v === 'string' ? (v.trim() || null) : v; };
+    set('nome', d.nome); set('objetivo', d.objetivo); set('canal', d.canal); set('publico', d.publico); set('cupom_id', d.cupomId);
+    set('mensagem', d.mensagem); set('data_inicio', d.dataInicio); set('data_fim', d.dataFim); set('janela_atribuicao_dias', d.janela);
+    set('meta_pedidos', d.metaPedidos); set('meta_receita', d.metaReceita); set('observacoes', d.observacoes); set('resultado_notas', d.resultadoNotas);
+    if (l.canal !== undefined && !CANAIS_CAMPANHA.includes(l.canal)) throw new ErroDados('validacao', 'Canal inválido.');
+    if (l.publico !== undefined && !PUBLICOS_CAMPANHA.includes(l.publico)) throw new ErroDados('validacao', 'Público inválido.');
+    if (l.cupom_id && !UUID_RE.test(l.cupom_id)) throw new ErroDados('validacao', 'Cupom inválido.');
+    return l;
+  }
+
+  async function campanhaCriar(d) {
+    exigirCliente();
+    const r = await gravar(() => sb.from('campanhas').insert(linhaCampanha(d)).select('id').single(), 'a campanha');
+    return r.id;
+  }
+
+  /** Altera a campanha SÓ se ninguém a alterou depois da leitura (atualizado_em). */
+  async function campanhaAtualizar(id, atualizadoEm, d, status) {
+    exigirCliente();
+    if (!UUID_RE.test(String(id || '')) || !atualizadoEm) throw new ErroDados('validacao', 'Campanha inválida.');
+    const l = d ? linhaCampanha(d) : {};
+    if (status) { if (status !== 'concluida') throw new ErroDados('validacao', 'Mudança de status inválida.'); l.status = status; }
+    if (!Object.keys(l).length) return null;
+    const r = await gravar(() => sb.from('campanhas').update(l).eq('id', id).eq('atualizado_em', atualizadoEm).select('id, atualizado_em'), 'a campanha');
+    if (r && r.length) return r[0];
+    const atual = await lerUm(() => sb.from('campanhas').select('id, atualizado_em').eq('id', id).maybeSingle(), 'a campanha');
+    if (!atual) throw new ErroDados('nao_encontrado', 'Esta campanha não existe mais.');
+    if (atual.atualizado_em !== atualizadoEm) throw new ErroDados('conflito', 'Esta campanha foi alterada por outra pessoa enquanto você editava. Os dados foram recarregados: confira e salve de novo.');
+    throw new ErroDados('permissao', 'O banco não permitiu a alteração.');
+  }
+
+  async function campanhaExcluir(id) {
+    const r = await gravar(() => sb.from('campanhas').delete().eq('id', id).eq('status', 'rascunho').select('id'), 'a campanha');
+    if (!r || !r.length) throw new ErroDados('permissao', 'Só o administrador exclui, e só rascunho sem nenhum envio marcado.');
+    return r;
+  }
+
+  function campanhaAprovar(id, observacao) { return rpc('campanha_aprovar', { p_campanha: id, p_observacao: observacao }, 'a aprovação'); }
+  function campanhaIncluir(id, clientes) { return rpc('campanha_incluir_destinatarios', { p_campanha: id, p_clientes: clientes }, 'os destinatários'); }
+  function campanhaRevalidar(id) { return rpc('campanha_revalidar', { p_campanha: id }, 'a revalidação'); }
+  function campanhaMarcarEnvio(destinatarioId) { return rpc('campanha_marcar_envio', { p_destinatario: destinatarioId }, 'o envio'); }
+  async function campanhaRemoverDestinatario(destinatarioId) {
+    const r = await gravar(() => sb.from('campanha_destinatarios').delete().eq('id', destinatarioId).neq('situacao', 'enviado').select('id'), 'o destinatário');
+    if (!r || !r.length) throw new ErroDados('conflito', 'O destinatário não pode ser removido (já marcado como enviado ou não existe mais).');
+    return r;
+  }
+
+  /** Candidatos REAIS do público, só quem tem permissão atual de marketing no canal (o banco confere de novo ao incluir). */
+  async function campanhaCandidatos(f) {
+    exigirCliente();
+    const canal = CANAIS_CAMPANHA.includes(f.canal) ? f.canal : null;
+    if (!canal) throw new ErroDados('validacao', 'Canal inválido.');
+    const pode = canal === 'email' ? 'pode_email' : 'pode_whatsapp';
+    const t = termoBusca(f.q);
+    if (f.publico === 'janela' || f.publico === 'atrasado') {
+      let q = sb.from('v_recompra_painel').select('cliente_id, cliente_nome, produto, reposicao_estimada').neq('cliente_fonte', 'ficticio')
+        .eq('situacao', f.publico).eq(pode, true);
+      if (t) q = q.ilike('cliente_nome', `*${t}*`);
+      const r = await lerUm(() => q.order('reposicao_estimada').order('cliente_id').limit(1000), 'os candidatos');
+      const vistos = new Map();
+      (r || []).forEach(x => { if (!vistos.has(x.cliente_id)) vistos.set(x.cliente_id, { id: x.cliente_id, nome: x.cliente_nome, detalhe: `${x.produto} · reposição ${x.reposicao_estimada}` }); });
+      return [...vistos.values()].slice(0, 500);
+    }
+    let q = sb.from('v_clientes_resumo').select('id, nome, cidade, uf, segmento, pedidos_pagos, ultima_compra, status_comercial')
+      .neq('fonte', 'ficticio').eq('anonimizado', false).neq('status_comercial', 'nao_contatar').eq(pode, true);
+    if (f.publico !== 'selecao_manual') q = q.eq('segmento', f.publico);
+    if (t) q = q.ilike('nome', `*${t}*`);
+    const r = await lerUm(() => q.order('nome').order('id').limit(500), 'os candidatos');
+    return (r || []).map(x => ({ id: x.id, nome: x.nome, detalhe: [x.cidade && `${x.cidade}/${x.uf || ''}`, `${num(x.pedidos_pagos)} pedidos`, x.ultima_compra && `última compra ${x.ultima_compra}`].filter(Boolean).join(' · ') }));
+  }
+
+  /** Cupons de UMA origem + códigos usados em pedidos pagos da loja que ainda não foram cadastrados. */
+  async function cupons(origemPedida) {
+    exigirCliente();
+    const origem = origemPedida === 'ficticio' ? 'ficticio' : 'real';
+    const [lista, usados] = await Promise.all([
+      lerTudo(o => filtrarOrigem(sb.from('cupons').select('id, codigo, tipo, valor, ativo, fonte, criado_em', o), origem).order('codigo').order('id'), 'os cupons'),
+      origem === 'real'
+        ? lerTudo(o => sb.from('pedidos').select('cupom_codigo', o).eq('fonte', 'nuvemshop').eq('status', 'pago').not('cupom_codigo', 'is', null).order('id'), 'os cupons usados na loja')
+        : Promise.resolve([])
+    ]);
+    const cadastrados = new Set(lista.map(c => c.codigo.trim().toUpperCase()));
+    const contagem = new Map();
+    usados.forEach(p => { const k = String(p.cupom_codigo || '').trim().toUpperCase(); if (k && !cadastrados.has(k)) contagem.set(k, (contagem.get(k) || 0) + 1); });
+    return {
+      itens: lista.map(c => ({ id: c.id, codigo: c.codigo, tipo: c.tipo, valor: c.valor === null ? null : num(c.valor), ativo: c.ativo, fonte: c.fonte })),
+      usadosNaoCadastrados: [...contagem.entries()].map(([codigo, n]) => ({ codigo, pedidos: n })).sort((a, b) => b.pedidos - a.pedidos || a.codigo.localeCompare(b.codigo))
+    };
+  }
+  function cupomRegistrar(d) { return rpc('cupom_registrar', { p_codigo: d.codigo, p_tipo: d.tipo || null, p_valor: d.valor === '' || d.valor === undefined || d.valor === null ? null : Number(d.valor) }, 'o cupom'); }
+  function cupomAlterarStatus(id, ativo) { return rpc('cupom_alterar_status', { p_id: id, p_ativo: !!ativo }, 'o cupom'); }
+
+  // ---------------------------------------------------------------
   // Nuvemshop — SOMENTE teste de conexão (Edge Function nuvemshop-consulta)
   //   Usa o cliente da sessão (o token do usuário vai sozinho no cabeçalho).
   //   Nada é gravado, importado ou sincronizado. Da resposta só sai um RESUMO:
@@ -1155,6 +1360,21 @@
     funilRegistrarInteracao,
     funilRejeitarSugestao,
     funilBuscarClientes,
+    campanhasLista,
+    campanhaDetalhe,
+    campanhaContatos,
+    campanhaCriar,
+    campanhaAtualizar,
+    campanhaExcluir,
+    campanhaAprovar,
+    campanhaIncluir,
+    campanhaRevalidar,
+    campanhaMarcarEnvio,
+    campanhaRemoverDestinatario,
+    campanhaCandidatos,
+    cupons,
+    cupomRegistrar,
+    cupomAlterarStatus,
     testarNuvemshop,
     nuvemshopSincronizar,
     nuvemshopPainel,
