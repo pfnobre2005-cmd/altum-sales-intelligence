@@ -1172,6 +1172,57 @@
   function cupomRegistrar(d) { return rpc('cupom_registrar', { p_codigo: d.codigo, p_tipo: d.tipo || null, p_valor: d.valor === '' || d.valor === undefined || d.valor === null ? null : Number(d.valor) }, 'o cupom'); }
   function cupomAlterarStatus(id, ativo) { return rpc('cupom_alterar_status', { p_id: id, p_ativo: !!ativo }, 'o cupom'); }
 
+  // Regras reais de segmentação: tabela protegida por RLS (admin + MFA).
+  // Nunca escreve no protótipo local nem altera Nuvemshop/cron.
+  const CAMPOS_REGRAS = {
+    inativoAposDias: ['inativo_apos_dias', 15, 720],
+    fidelidadeMinPedidos: ['fidelidade_min_pedidos', 2, 20],
+    janelaAntesDias: ['janela_antes_dias', 0, 60],
+    janelaDepoisDias: ['janela_depois_dias', 0, 120]
+  };
+  function mapearRegras(c) {
+    return {
+      id: c.id, atualizadoEm: c.atualizado_em,
+      inativoAposDias: c.inativo_apos_dias, fidelidadeMinPedidos: c.fidelidade_min_pedidos,
+      janelaAntesDias: c.janela_antes_dias, janelaDepoisDias: c.janela_depois_dias
+    };
+  }
+  async function regrasReais() {
+    exigirCliente();
+    let r;
+    try {
+      r = await sb.from('configuracoes')
+        .select('id, inativo_apos_dias, fidelidade_min_pedidos, janela_antes_dias, janela_depois_dias, atualizado_em');
+    } catch (e) { throw traduzirErro(e, 'as regras reais'); }
+    if (r.error) throw traduzirErro(r.error, 'as regras reais');
+    if (!Array.isArray(r.data) || r.data.length !== 1)
+      throw new ErroDados('acesso', 'Não foi possível verificar a configuração única do Supabase. Nenhuma regra será alterada.');
+    return mapearRegras(r.data[0]);
+  }
+  async function salvarRegrasReais(atual, valores) {
+    exigirCliente();
+    if (!atual || !Number.isInteger(atual.id) || !atual.atualizadoEm)
+      throw new ErroDados('validacao', 'Recarregue as regras atuais antes de salvar.');
+    const patch = {};
+    for (const [campo, [coluna, minimo, maximo]] of Object.entries(CAMPOS_REGRAS)) {
+      const n = Number(valores[campo]);
+      if (!Number.isInteger(n) || n < minimo || n > maximo || String(valores[campo]).trim() === '')
+        throw new ErroDados('validacao', `Valor inválido em ${campo}. Informe um inteiro entre ${minimo} e ${maximo}.`);
+      patch[coluna] = n;
+    }
+    // Evita sobrescrever silenciosamente mudanças feitas em outra sessão.
+    let r;
+    try {
+      r = await sb.from('configuracoes').update(patch)
+        .eq('id', atual.id).eq('atualizado_em', atual.atualizadoEm)
+        .select('id, inativo_apos_dias, fidelidade_min_pedidos, janela_antes_dias, janela_depois_dias, atualizado_em');
+    } catch (e) { throw traduzirErro(e, 'a gravação das regras reais'); }
+    if (r.error) throw traduzirErroGravacao(r.error, 'as regras reais');
+    if (!Array.isArray(r.data) || r.data.length !== 1)
+      throw new ErroDados('conflito', 'As regras foram alteradas em outra sessão ou você não tem permissão. Recarregue antes de tentar novamente.');
+    return mapearRegras(r.data[0]);
+  }
+
   // ---------------------------------------------------------------
   // Inteligência comercial (somente leitura; só dados REAIS; nada de nome/contato de cliente)
   //   Reaproveita: pedidos pagos + itens (003/014), produtos (011), v_campanhas_resultados
@@ -1434,6 +1485,8 @@
     cupomRegistrar,
     cupomAlterarStatus,
     inteligencia,
+    regrasReais,
+    salvarRegrasReais,
     testarNuvemshop,
     nuvemshopSincronizar,
     nuvemshopPainel,
