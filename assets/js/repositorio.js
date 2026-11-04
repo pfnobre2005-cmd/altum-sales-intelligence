@@ -692,6 +692,282 @@
   }
 
   // ---------------------------------------------------------------
+  // Prospecção & Funil (004 leads/histórico/interações/sugestões, 005 bases para contato,
+  //   007 auditoria e supressão, 008 MFA/anonimização, 015 separação real × fictício).
+  //   Leitura e gravação direto nas tabelas, sempre sob o RLS (perfil ativo + 2 etapas).
+  //   Edição simultânea: toda alteração grava "onde atualizado_em = <valor lido>".
+  //   Nada é enviado a ninguém: a tela só registra.
+  // ---------------------------------------------------------------
+  const ETAPAS_FUNIL = ['novo', 'autorizado', 'atendimento', 'interessado', 'proposta', 'comprou', 'perdido'];
+  const FINALIDADES_CONTATO = ['atendimento_solicitado', 'prospeccao_b2b', 'relacionamento'];
+  const BASES_CONTATO = {               // combinações aceitas pela 005 (R6) para liberar o funil
+    'atendimento_solicitado|contrato_ou_preliminares': true, 'atendimento_solicitado|consentimento': true,
+    'prospeccao_b2b|consentimento': true, 'prospeccao_b2b|legitimo_interesse': true,
+    'relacionamento|consentimento': true, 'relacionamento|legitimo_interesse': true
+  };
+  const CANAIS_INTERACAO = ['whatsapp', 'email', 'telefone', 'instagram'];
+  const COLUNAS_LEAD = 'id, nome, origem, email, telefone, empresa, etapa, proximo_contato, valor_potencial, motivo_perda, '
+    + 'responsavel_id, cliente_id, cliente_vinculado_em, motivo_duplicidade, fonte, criado_por, criado_em, atualizado_em';
+  const MSG_SEM_ACESSO = 'O banco não liberou a leitura dos dados. Saia e entre novamente com o código do autenticador.';
+
+  // Mesmas regras de app.normalizar_email / app.normalizar_telefone (001)
+  function normEmail(e) { const t = String(e || '').replace(/^ +| +$/g, '').toLowerCase(); return t || null; }
+  function normTelefone(t) {
+    const s = String(t || ''), d = s.replace(/\D/g, '');
+    if (!d) return null;
+    if (s.replace(/^ +/, '').startsWith('+')) return d;
+    return d.length === 10 || d.length === 11 ? '55' + d : d;
+  }
+
+  function mapearLead(l, nomes) {
+    return {
+      id: l.id, nome: l.nome, origem: l.origem, email: l.email, telefone: l.telefone, empresa: l.empresa,
+      etapa: l.etapa, proximoContato: l.proximo_contato, valor: num(l.valor_potencial), motivoPerda: l.motivo_perda,
+      responsavelId: l.responsavel_id, responsavel: l.responsavel_id ? (nomes.get(l.responsavel_id) || 'Outro usuário') : null,
+      clienteId: l.cliente_id, clienteVinculadoEm: l.cliente_vinculado_em, motivoDuplicidade: l.motivo_duplicidade,
+      fonte: l.fonte, criadoPor: l.criado_por ? (nomes.get(l.criado_por) || 'Outro usuário') : null,
+      criadoEm: diaLocal(l.criado_em), atualizadoEm: l.atualizado_em
+    };
+  }
+
+  // Nomes de usuários: o banco mostra ao operador só o próprio perfil; ao administrador, todos (002).
+  async function perfisVisiveis() {
+    const p = await lerTudo(o => sb.from('perfis').select('id, nome, papel, ativo', o).order('nome').order('id'), 'os usuários');
+    return p.map(x => ({ id: x.id, nome: x.nome, papel: x.papel, ativo: x.ativo }));
+  }
+
+  // id do usuário da sessão (só para "Meus contatos" e "(você)" na tela; quem decide acesso é o RLS)
+  async function usuarioDaSessao() {
+    try { const r = await sb.auth.getSession(); return (r && r.data && r.data.session && r.data.session.user && r.data.session.user.id) || null; }
+    catch (e) { return null; }
+  }
+
+  // Origem (real × fictício) dos clientes citados, em lotes
+  async function fontesDeClientes(ids) {
+    const unicos = [...new Set(ids.filter(x => UUID_RE.test(String(x || ''))))];
+    const mapa = new Map();
+    for (let i = 0; i < unicos.length; i += 150) {
+      const lote = unicos.slice(i, i + 150);
+      const r = await lerUm(() => sb.from('clientes').select('id, nome, cidade, uf, fonte, anonimizado_em').in('id', lote), 'os clientes vinculados');
+      (r || []).forEach(c => mapa.set(c.id, c));
+    }
+    return mapa;
+  }
+
+  /** Quadro do funil: contatos ATIVOS de uma origem + base para contato + sugestões de vínculo pendentes. */
+  async function funilLista(origemPedida) {
+    exigirCliente();
+    const origem = origemPedida === 'ficticio' ? 'ficticio' : 'real';
+    let cfg, leads, bases, sugestoes, perfis, fic, eu;
+    try {
+      [cfg, leads, bases, sugestoes, perfis, fic, eu] = await Promise.all([
+        lerTudo(o => sb.from('configuracoes').select('id', o).order('id'), 'as configurações'),
+        lerTudo(o => filtrarOrigem(sb.from('leads').select(COLUNAS_LEAD, o), origem).is('anonimizado_em', null)
+          .order('criado_em', { ascending: false }).order('id'), 'os contatos do funil'),
+        lerTudo(o => sb.from('bases_tratamento').select('id, lead_id', o).not('lead_id', 'is', null).is('encerrada_em', null)
+          .in('finalidade', FINALIDADES_CONTATO).order('id'), 'as bases para contato'),
+        lerTudo(o => sb.from('sugestoes_vinculo').select('id, lead_id, cliente_id', o).eq('tipo', 'lead_cliente').eq('status', 'pendente').order('id'), 'as sugestões de vínculo'),
+        perfisVisiveis(),
+        contar(() => sb.from('leads').select('id', { count: 'exact', head: true }).eq('fonte', 'ficticio'), 'os dados de teste'),
+        usuarioDaSessao()
+      ]);
+    } catch (e) { throw e instanceof ErroDados ? e : traduzirErro(e, 'o funil'); }
+    if (cfg.length !== 1) throw new ErroDados('acesso', MSG_SEM_ACESSO);
+    if (leads.some(l => !daOrigem(l.fonte, origem))) throw new ErroDados('consulta', 'O banco devolveu contatos de outra origem. Nada foi exibido.');
+
+    const idsLeads = new Set(leads.map(l => l.id));
+    const sugs = sugestoes.filter(s => idsLeads.has(s.lead_id));
+    const fontes = await fontesDeClientes(sugs.map(s => s.cliente_id));
+    const comBase = new Set(bases.map(b => b.lead_id));
+    const nSug = new Map();
+    sugs.forEach(s => {                  // sugestão para cliente de OUTRA origem ou anonimizado não aparece
+      const c = fontes.get(s.cliente_id);
+      if (!c || c.anonimizado_em || !daOrigem(c.fonte, origem)) return;
+      nSug.set(s.lead_id, (nSug.get(s.lead_id) || 0) + 1);
+    });
+    const nomes = new Map(perfis.map(p => [p.id, p.nome]));
+    return {
+      origem, lidoEm: new Date(), existemFicticios: fic > 0, perfis, usuarioId: eu,
+      itens: leads.map(l => Object.assign(mapearLead(l, nomes), { temBase: comBase.has(l.id), sugestoes: nSug.get(l.id) || 0 }))
+    };
+  }
+
+  /** Ficha completa de um contato do funil. */
+  async function funilLead(id) {
+    exigirCliente();
+    if (!UUID_RE.test(String(id || ''))) throw new ErroDados('nao_encontrado', 'Contato inválido.');
+    const [l, movs, inter, bases, sugs, hist, oposicoes, perfis, testes, eu] = await Promise.all([
+      lerUm(() => sb.from('leads').select(COLUNAS_LEAD + ', anonimizado_em').eq('id', id).maybeSingle(), 'o contato'),
+      lerTudo(o => sb.from('lead_movimentacoes').select('id, etapa_anterior, etapa_nova, movido_por, movido_em', o).eq('lead_id', id)
+        .order('movido_em', { ascending: false }).order('id'), 'o histórico do funil'),
+      lerTudo(o => sb.from('interacoes').select('id, data, canal, nota, autor_id, fonte', o).eq('lead_id', id)
+        .order('data', { ascending: false }).order('id'), 'as observações'),
+      lerTudo(o => sb.from('bases_tratamento').select('id, finalidade, base_legal, evidencia, registrado_por, registrado_em, encerrada_em, motivo_encerramento', o)
+        .eq('lead_id', id).order('registrado_em', { ascending: false }).order('id'), 'as bases para contato'),
+      lerTudo(o => sb.from('sugestoes_vinculo').select('id, cliente_id, motivo, criado_em', o).eq('lead_id', id).eq('tipo', 'lead_cliente')
+        .eq('status', 'pendente').order('criado_em').order('id'), 'as sugestões de vínculo'),
+      lerTudo(o => sb.from('lead_vinculos_historico').select('id, acao, cliente_id, cliente_anterior_id, origem, feito_por, feito_em', o).eq('lead_id', id)
+        .order('feito_em', { ascending: false }).order('id'), 'o histórico de vínculos'),
+      lerTudo(o => sb.from('oposicoes').select('id, escopo', o).eq('lead_id', id).is('encerrada_em', null).order('id'), 'as oposições'),
+      perfisVisiveis(),
+      lerTudo(o => sb.from('testes_legitimo_interesse').select('id, finalidade', o).is('encerrado_em', null).order('id'), 'os testes de legítimo interesse'),
+      usuarioDaSessao()
+    ]);
+    if (!l) throw new ErroDados('nao_encontrado', 'Contato não encontrado (pode ter sido excluído).');
+    const nomes = new Map(perfis.map(p => [p.id, p.nome]));
+    const quem = idp => (idp ? nomes.get(idp) || 'Outro usuário' : 'Sistema');
+    const clientes = await fontesDeClientes([l.cliente_id, ...sugs.map(s => s.cliente_id), ...hist.map(h => h.cliente_id), ...hist.map(h => h.cliente_anterior_id)]);
+    const resumoCliente = cid => { const c = clientes.get(cid); return c ? { id: c.id, nome: c.anonimizado_em ? 'Cliente anonimizado' : c.nome, cidade: c.cidade, uf: c.uf, fonte: c.fonte } : null; };
+    const origem = l.fonte === 'ficticio' ? 'ficticio' : 'real';
+    const oposicaoTotal = oposicoes.some(o => o.escopo === 'todo_contato_nao_essencial');
+    return {
+      lidoEm: new Date(), perfis, usuarioId: eu,
+      lead: Object.assign(mapearLead(l, nomes), {
+        anonimizado: !!l.anonimizado_em,
+        temBase: bases.some(b => !b.encerrada_em && FINALIDADES_CONTATO.includes(b.finalidade)),
+        oposicaoTotal, oposicaoMarketing: oposicoes.some(o => o.escopo === 'marketing')
+      }),
+      cliente: l.cliente_id ? resumoCliente(l.cliente_id) : null,
+      movimentacoes: movs.map(m => ({ de: m.etapa_anterior, para: m.etapa_nova, por: quem(m.movido_por), em: m.movido_em })),
+      interacoes: inter.map(i => ({ id: i.id, data: i.data, canal: i.canal, nota: i.nota, por: quem(i.autor_id), fonte: i.fonte })),
+      bases: bases.map(b => ({ id: b.id, finalidade: b.finalidade, baseLegal: b.base_legal, evidencia: b.evidencia, por: quem(b.registrado_por),
+                               em: b.registrado_em, encerradaEm: b.encerrada_em, motivoEncerramento: b.motivo_encerramento })),
+      // só clientes da MESMA origem e não anonimizados (sugestão mista é resolvida na remoção dos fictícios)
+      sugestoes: sugs.map(s => ({ id: s.id, motivo: s.motivo, criadoEm: s.criado_em, cliente: resumoCliente(s.cliente_id) }))
+        .filter(s => s.cliente && s.cliente.nome !== 'Cliente anonimizado' && daOrigem(s.cliente.fonte, origem)),
+      vinculos: hist.map(h => ({ acao: h.acao, cliente: resumoCliente(h.cliente_id), anterior: resumoCliente(h.cliente_anterior_id), origem: h.origem, por: quem(h.feito_por), em: h.feito_em })),
+      testesLi: testes.map(t => ({ id: t.id, finalidade: t.finalidade }))
+    };
+  }
+
+  /** Possíveis duplicados ANTES de criar: contatos reais do funil com o mesmo e-mail/telefone e clientes reais
+   *  (clientes_possiveis_duplicados, 012: só reais, sem devolver contato). Nunca bloqueia: a pessoa decide. */
+  async function funilPossiveisDuplicados(d) {
+    exigirCliente();
+    const em = normEmail(d.email), tel = normTelefone(d.telefone);
+    const consultas = [];
+    const leadsPor = col => lerUm(() => sb.from('leads').select('id, nome, empresa, etapa, fonte').eq(col.c, col.v)
+      .neq('fonte', 'ficticio').is('anonimizado_em', null).limit(20), 'os possíveis duplicados');
+    if (em) consultas.push(leadsPor({ c: 'email_norm', v: em }).then(r => (r || []).map(x => Object.assign(x, { motivo: 'mesmo_email' }))));
+    if (tel) consultas.push(leadsPor({ c: 'telefone_norm', v: tel }).then(r => (r || []).map(x => Object.assign(x, { motivo: 'mesmo_telefone' }))));
+    const [cli, ...listas] = await Promise.all([
+      (em || tel) ? rpc('clientes_possiveis_duplicados', { p_id: null, p_nome: d.nome || null, p_email: d.email || null, p_telefone: d.telefone || null, p_cidade: null }, 'os possíveis duplicados') : Promise.resolve([]),
+      ...consultas
+    ]);
+    const leads = new Map();
+    listas.flat().forEach(x => { if (x.id !== d.id && !leads.has(x.id)) leads.set(x.id, { id: x.id, nome: x.nome, empresa: x.empresa, etapa: x.etapa, motivo: x.motivo }); });
+    const clientes = (Array.isArray(cli) ? cli : []).filter(c => c.motivo !== 'nome_cidade')
+      .map(c => ({ id: c.id, nome: c.nome, cidade: c.cidade, uf: c.uf, motivo: c.motivo }));
+    return { leads: [...leads.values()], clientes };
+  }
+
+  async function exigirClienteReal(clienteId) {
+    if (!UUID_RE.test(String(clienteId || ''))) throw new ErroDados('validacao', 'Cliente inválido.');
+    const c = await lerUm(() => sb.from('clientes').select('id, fonte, anonimizado_em').eq('id', clienteId).maybeSingle(), 'o cliente');
+    if (!c) throw new ErroDados('nao_encontrado', 'Cliente não encontrado.');
+    if (c.fonte === 'ficticio') throw new ErroDados('validacao', 'Contato real não pode ser vinculado a cliente fictício (dados de teste).');
+    if (c.anonimizado_em) throw new ErroDados('validacao', 'Cliente anonimizado não pode ser vinculado a um contato.');
+  }
+
+  function linhaBase(leadId, b) {
+    if (!BASES_CONTATO[`${b.finalidade}|${b.baseLegal}`]) throw new ErroDados('validacao', 'Escolha uma base para contato válida.');
+    const linha = { lead_id: leadId, finalidade: b.finalidade, base_legal: b.baseLegal, evidencia: String(b.evidencia || '').trim() };
+    if (b.baseLegal === 'legitimo_interesse') {
+      if (!UUID_RE.test(String(b.testeLiId || ''))) throw new ErroDados('validacao', 'Legítimo interesse exige teste aprovado pelo administrador.');
+      linha.teste_li_id = b.testeLiId;
+    }
+    return linha;
+  }
+
+  /** Cria contato real (fonte "manual", carimbos de autor/responsável pelo banco). Etapa inicial sempre "Novo contato";
+   *  com base para contato informada, registra a base e avança para "Contato autorizado". */
+  async function funilCriar(d) {
+    exigirCliente();
+    const linha = {
+      nome: String(d.nome || '').trim(), origem: d.origem,
+      email: String(d.email || '').trim() || null, telefone: String(d.telefone || '').trim() || null,
+      empresa: String(d.empresa || '').trim() || null, proximo_contato: d.proximoContato || null,
+      valor_potencial: Number(d.valor) > 0 ? Number(d.valor) : 0
+    };
+    if (UUID_RE.test(String(d.responsavelId || ''))) linha.responsavel_id = d.responsavelId;
+    if (d.clienteId) { await exigirClienteReal(d.clienteId); linha.cliente_id = d.clienteId; }
+    if (d.motivoDuplicidade) linha.motivo_duplicidade = String(d.motivoDuplicidade).trim().slice(0, 500);
+    const baseLinha = d.base ? linhaBase('00000000-0000-0000-0000-000000000000', d.base) : null;   // valida antes de criar
+    const r = await gravar(() => sb.from('leads').insert(linha).select('id, atualizado_em').single(), 'o contato');
+    const avisos = [];
+    if (baseLinha) {
+      try {
+        await gravar(() => sb.from('bases_tratamento').insert(Object.assign(baseLinha, { lead_id: r.id })), 'a base para contato');
+        await funilAtualizar(r.id, r.atualizado_em, { etapa: 'autorizado' });
+      } catch (e) { avisos.push(`A base para contato não foi registrada (${e.message}). O contato ficou em "Novo contato".`); }
+    }
+    if (d.nota) {
+      try { await funilRegistrarInteracao(r.id, { canal: d.canal, nota: d.nota }); }
+      catch (e) { avisos.push(`A observação não foi registrada (${e.message}).`); }
+    }
+    return { id: r.id, avisos };
+  }
+
+  /** Altera o contato SÓ se ninguém o alterou depois da leitura (atualizado_em). */
+  async function funilAtualizar(id, atualizadoEm, patch) {
+    exigirCliente();
+    if (!UUID_RE.test(String(id || '')) || !atualizadoEm) throw new ErroDados('validacao', 'Contato inválido.');
+    const m = {};
+    const mapa = { nome: 'nome', origem: 'origem', email: 'email', telefone: 'telefone', empresa: 'empresa', etapa: 'etapa',
+                   proximoContato: 'proximo_contato', valor: 'valor_potencial', motivoPerda: 'motivo_perda', responsavelId: 'responsavel_id',
+                   clienteId: 'cliente_id' };
+    Object.keys(patch).forEach(k => {
+      const col = mapa[k] || (Object.values(mapa).includes(k) ? k : null);
+      if (!col) return;
+      let v = patch[k];
+      if (typeof v === 'string') v = v.trim();
+      m[col] = v === '' ? null : v;
+    });
+    if (m.etapa && !ETAPAS_FUNIL.includes(m.etapa)) throw new ErroDados('validacao', 'Etapa inválida.');
+    if (m.etapa === 'comprou' || m.etapa === 'perdido') m.proximo_contato = null;
+    if (m.valor_potencial !== undefined) m.valor_potencial = Number(m.valor_potencial) > 0 ? Number(m.valor_potencial) : 0;
+    if (m.cliente_id) await exigirClienteReal(m.cliente_id);
+    const r = await gravar(() => sb.from('leads').update(m).eq('id', id).eq('atualizado_em', atualizadoEm).select('id, atualizado_em'), 'o contato');
+    if (r && r.length) return r[0];
+    const atual = await lerUm(() => sb.from('leads').select('id, atualizado_em, anonimizado_em').eq('id', id).maybeSingle(), 'o contato');
+    if (!atual) throw new ErroDados('nao_encontrado', 'Este contato não existe mais.');
+    if (atual.anonimizado_em) throw new ErroDados('permissao', 'Contato anonimizado (LGPD): não pode ser alterado.');
+    if (atual.atualizado_em !== atualizadoEm) throw new ErroDados('conflito', 'Este contato foi alterado por outra pessoa enquanto você editava. Os dados foram recarregados: confira e salve de novo.');
+    throw new ErroDados('permissao', 'O banco não permitiu a alteração. Verifique se o seu perfil está ativo com verificação em 2 etapas.');
+  }
+
+  function funilRegistrarBase(leadId, b) {
+    return gravar(() => sb.from('bases_tratamento').insert(linhaBase(leadId, b)), 'a base para contato');
+  }
+
+  function funilRegistrarInteracao(leadId, d) {
+    if (!CANAIS_INTERACAO.includes(d.canal)) return Promise.reject(new ErroDados('validacao', 'Escolha o canal.'));
+    const nota = String(d.nota || '').trim();
+    if (!nota || nota.length > 2000) return Promise.reject(new ErroDados('validacao', 'A observação precisa ter de 1 a 2.000 caracteres.'));
+    const linha = { lead_id: leadId, canal: d.canal, nota };
+    if (d.data) linha.data = d.data;
+    return gravar(() => sb.from('interacoes').insert(linha), 'a observação');
+  }
+
+  async function funilRejeitarSugestao(id) {
+    const r = await gravar(() => sb.from('sugestoes_vinculo').update({ status: 'rejeitada' }).eq('id', id).eq('status', 'pendente').select('id'), 'a sugestão');
+    if (!r || !r.length) throw new ErroDados('conflito', 'A sugestão já foi decidida ou não está mais disponível.');
+    return r;
+  }
+
+  /** Busca de clientes REAIS para vincular (nome, ou e-mail/telefone completos via RPC que devolve só IDs). */
+  async function funilBuscarClientes(q) {
+    exigirCliente();
+    const t = termoBusca(q);
+    if (t.length < 2) return [];
+    const ids = await idsPorContato(q);
+    let consulta = sb.from('v_clientes_resumo').select('id, nome, cidade, uf, fonte, pedidos_pagos').neq('fonte', 'ficticio').eq('anonimizado', false);
+    consulta = ids.length ? consulta.or(`nome.ilike.*${t}*,id.in.(${ids.join(',')})`) : consulta.ilike('nome', `*${t}*`);
+    const r = await lerUm(() => consulta.order('nome').order('id').limit(10), 'os clientes');
+    return (r || []).filter(c => c.fonte !== 'ficticio').map(c => ({ id: c.id, nome: c.nome, cidade: c.cidade, uf: c.uf, pedidos: num(c.pedidos_pagos) }));
+  }
+
+  // ---------------------------------------------------------------
   // Nuvemshop — SOMENTE teste de conexão (Edge Function nuvemshop-consulta)
   //   Usa o cliente da sessão (o token do usuário vai sozinho no cabeçalho).
   //   Nada é gravado, importado ou sincronizado. Da resposta só sai um RESUMO:
@@ -870,6 +1146,15 @@
     recompraDetalhe,
     recompraContato,
     recompraRegistrar,
+    funilLista,
+    funilLead,
+    funilPossiveisDuplicados,
+    funilCriar,
+    funilAtualizar,
+    funilRegistrarBase,
+    funilRegistrarInteracao,
+    funilRejeitarSugestao,
+    funilBuscarClientes,
     testarNuvemshop,
     nuvemshopSincronizar,
     nuvemshopPainel,

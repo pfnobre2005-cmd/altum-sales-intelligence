@@ -182,7 +182,7 @@
           <td>${ui.date(l.proximoContato)} ${l.proximoContato < an.iso(an.today()) ? ui.badge('atrasado', 'warn') : ui.badge('hoje', 'sage')}</td></tr>`).join('')}
         </tbody></table></div>` : ui.empty('Nenhum follow-up pendente.')}
       </section>
-      <p class="small muted">O Funil ainda usa a base local; o atalho para ele volta quando a tela for conectada ao banco.</p>`;
+      <p class="small"><a href="#/funil" class="link" id="verFunil">Abrir Prospecção & funil →</a></p>`;
   }
 
   function trocarOrigem(o) {
