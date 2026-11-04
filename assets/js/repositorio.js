@@ -1173,6 +1173,64 @@
   function cupomAlterarStatus(id, ativo) { return rpc('cupom_alterar_status', { p_id: id, p_ativo: !!ativo }, 'o cupom'); }
 
   // ---------------------------------------------------------------
+  // Inteligência comercial (somente leitura; só dados REAIS; nada de nome/contato de cliente)
+  //   Reaproveita: pedidos pagos + itens (003/014), produtos (011), v_campanhas_resultados
+  //   (atribuição com evidência, 016), v_recompra_painel (013), v_clientes_resumo (012), leads (004).
+  // ---------------------------------------------------------------
+  async function inteligencia() {
+    exigirCliente();
+    const hoje = A.analytics.iso(A.analytics.today());
+    const real = q => q.neq('fonte', 'ficticio');
+    let cfg, clientes, pedidos, produtos, camps, recompra, fups, fieis, inativos;
+    try {
+      [cfg, clientes, pedidos, produtos, camps, recompra, fups, fieis, inativos] = await Promise.all([
+        lerTudo(o => sb.from('configuracoes').select('id, inativo_apos_dias, fidelidade_min_pedidos, janela_antes_dias, janela_depois_dias', o).order('id'), 'as configurações'),
+        lerTudo(o => real(sb.from('clientes').select('id, origem, fonte', o)).order('id'), 'os clientes'),
+        lerTudo(o => real(sb.from('pedidos').select('id, cliente_id, data_pedido, total, fonte, pedido_itens(produto_id, qtd, preco_unit)', o)).eq('status', 'pago').order('id'), 'os pedidos pagos'),
+        lerTudo(o => real(sb.from('produtos').select('id, nome, ciclo_recompra_dias, fonte', o)).order('id'), 'os produtos'),
+        lerTudo(o => real(sb.from('v_campanhas_resultados').select('campanha_id, nome, status, cupom, enviados, clientes_convertidos, pedidos_atribuidos, receita_atribuida, fonte', o))
+          .neq('status', 'rascunho').order('campanha_id'), 'as campanhas'),
+        lerTudo(o => sb.from('v_recompra_painel').select('cliente_id, produto_id, situacao, pode_contatar, cliente_fonte', o).neq('cliente_fonte', 'ficticio')
+          .in('situacao', ['janela', 'atrasado']).neq('acompanhamento', 'encerrada').order('cliente_id').order('produto_id'), 'as oportunidades de recompra'),
+        lerTudo(o => real(sb.from('leads').select('id, fonte', o)).is('anonimizado_em', null).not('etapa', 'in', '(comprou,perdido)')
+          .not('proximo_contato', 'is', null).lte('proximo_contato', hoje).order('id'), 'os follow-ups do funil'),
+        lerTudo(o => real(sb.from('v_clientes_resumo').select('id, pode_whatsapp, pode_email, fonte', o)).eq('anonimizado', false).eq('segmento', 'fieis')
+          .neq('status_comercial', 'nao_contatar').order('id'), 'os clientes elegíveis à fidelização'),
+        lerTudo(o => real(sb.from('v_clientes_resumo').select('id, pode_whatsapp, pode_email, fonte', o)).eq('anonimizado', false).eq('segmento', 'inativos')
+          .neq('status_comercial', 'nao_contatar').order('id'), 'os clientes inativos')
+      ]);
+    } catch (e) { throw e instanceof ErroDados ? e : traduzirErro(e, 'a inteligência comercial'); }
+    if (cfg.length !== 1) throw new ErroDados('acesso', MSG_SEM_ACESSO);
+    // conferência defensiva: nada fictício passa daqui
+    if ([clientes, pedidos, produtos, camps, fups, fieis, inativos].some(l => l.some(x => x.fonte === 'ficticio')) || recompra.some(x => x.cliente_fonte === 'ficticio'))
+      throw new ErroDados('consulta', 'O banco devolveu dados de teste junto com os reais. Nada foi exibido.');
+    const c = cfg[0];
+    const distintos = (lista, f) => new Set(lista.filter(f || (() => true)).map(x => x.cliente_id)).size;
+    const comPermissao = l => l.filter(x => x.pode_whatsapp === true || x.pode_email === true).length;
+    return {
+      lidoEm: new Date(),
+      // base no formato de A.analytics (só o necessário: ids, origem, pedidos pagos e itens)
+      base: {
+        regras: { inativoAposDias: c.inativo_apos_dias, fidelidadeMinPedidos: c.fidelidade_min_pedidos, janelaAntesDias: c.janela_antes_dias, janelaDepoisDias: c.janela_depois_dias },
+        clientes: clientes.map(x => ({ id: x.id, origem: x.origem || 'Sem origem informada' })),
+        pedidos: pedidos.map(p => ({ id: p.id, clienteId: p.cliente_id, data: diaLocal(p.data_pedido), status: 'pago', total: num(p.total),
+          itens: (p.pedido_itens || []).map(i => ({ produtoId: i.produto_id, qtd: num(i.qtd), precoUnit: num(i.preco_unit) })) })),
+        produtos: produtos.map(p => ({ id: p.id, nome: p.nome, cicloDias: p.ciclo_recompra_dias })),
+        leads: [], campanhas: []
+      },
+      campanhas: camps.map(r => ({ id: r.campanha_id, nome: r.nome, status: r.status, cupom: r.cupom, enviados: num(r.enviados),
+        compradores: num(r.clientes_convertidos), pedidos: num(r.pedidos_atribuidos), receita: num(r.receita_atribuida) })),
+      acompanhamento: {
+        janela: distintos(recompra, x => x.situacao === 'janela'), janelaComPermissao: distintos(recompra, x => x.situacao === 'janela' && x.pode_contatar === true),
+        atrasado: distintos(recompra, x => x.situacao === 'atrasado'),
+        followUps: fups.length,
+        fieis: fieis.length, fieisComPermissao: comPermissao(fieis),
+        inativos: inativos.length, inativosComPermissao: comPermissao(inativos)
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------
   // Nuvemshop — SOMENTE teste de conexão (Edge Function nuvemshop-consulta)
   //   Usa o cliente da sessão (o token do usuário vai sozinho no cabeçalho).
   //   Nada é gravado, importado ou sincronizado. Da resposta só sai um RESUMO:
@@ -1375,6 +1433,7 @@
     cupons,
     cupomRegistrar,
     cupomAlterarStatus,
+    inteligencia,
     testarNuvemshop,
     nuvemshopSincronizar,
     nuvemshopPainel,
