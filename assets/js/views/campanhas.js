@@ -20,7 +20,7 @@
   const PUBLICO = { janela: 'Na janela de recompra', atrasado: 'Recompra atrasada', primeira_compra: 'Primeira compra', recorrentes: 'Recorrentes ativos',
                     fieis: 'Elegíveis à fidelização', inativos: 'Inativos', selecao_manual: 'Seleção manual' };
   const MOTIVO = { anonimizado: 'Anonimizado (LGPD)', nao_contatar: 'Não contatar', oposicao: 'Oposição a marketing', sem_consentimento_no_canal: 'Sem consentimento no canal',
-                   negativa_em_registro_vinculado: 'Recusa em cadastro vinculado', mesma_pessoa: 'Mesma pessoa já na campanha' };
+                   negativa_em_registro_vinculado: 'Recusa em cadastro vinculado', mesma_pessoa: 'Mesma pessoa já na campanha', fora_do_publico: 'Fora do público da campanha' };
   const TIPO_CUPOM = { percentual: '% de desconto', valor_fixo: 'R$ de desconto', frete_gratis: 'Frete grátis' };
   const MODELOS = {
     recompra: 'Oi {primeiro_nome}! Aqui é da Altum Nutrition. Você levou {produto} em {data_ultima_compra}. Se quiser repor, o cupom {cupom} vale na próxima compra. Para não receber mais mensagens, responda SAIR.',
@@ -47,9 +47,29 @@
       <small>Suplemento não pode alegar prevenir, tratar ou curar doença; alegações de benefício só com o texto exato da IN 28/2018 e validação do responsável técnico.</small></div>`;
   }
 
+  // ---------- produto em foco: variantes do mesmo produto da loja escolhidas juntas ----------
+  const nomeBase = nome => String(nome || '').split(' — ')[0].trim();
+  const chaveGrupo = p => (p.produtoLoja ? 'loja:' + p.produtoLoja : 'id:' + p.id);
+  function gruposDeProdutos(produtos) {
+    const m = new Map();
+    produtos.forEach(p => {
+      const k = chaveGrupo(p);
+      if (!m.has(k)) m.set(k, { chave: k, nome: nomeBase(p.nome), ids: [], semCiclo: 0 });
+      const g = m.get(k); g.ids.push(p.id); if (!p.ciclo) g.semCiclo++;
+    });
+    return [...m.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+  // nome para a mensagem e para o cabeçalho: o produto da loja (sem a variante) quando todos são do mesmo
+  function nomeDoFoco(produtos) {
+    if (!produtos.length) return '';
+    const gs = gruposDeProdutos(produtos);
+    return gs.length === 1 ? gs[0].nome : produtos.map(p => p.nome).join(', ');
+  }
+  const RECOMPRA = ['janela', 'atrasado'];
+
   // Mensagem personalizada para copiar (o envio é feito pela pessoa, fora do sistema)
   function personalizar(texto, d, det) {
-    const produto = det.produtos.length ? det.produtos[0].nome : 'seu produto';
+    const produto = det.produtos.length ? nomeDoFoco(det.produtos) : 'seu produto';
     return String(texto || '')
       .replaceAll('{primeiro_nome}', String(d.nome || '').split(' ')[0])
       .replaceAll('{nome}', d.nome || '')
@@ -133,10 +153,20 @@
   async function abrirFormulario(det) {
     const c = det ? det.campanha : null;
     const travado = !!c && c.status !== 'rascunho';            // depois de iniciada: conteúdo congelado (006)
-    let cup;
-    try { cup = await R().cupons('real'); } catch (e) { ui.toast(e.message, 'warn'); return; }
+    let cup, prods;
+    try { [cup, prods] = await Promise.all([R().cupons('real'), R().produtosParaCampanha()]); } catch (e) { ui.toast(e.message, 'warn'); return; }
     const ativos = cup.itens.filter(x => x.ativo || (c && x.id === c.cupomId));
     const obj0 = c ? c.objetivo : 'recompra';
+    // produto em foco: um produto da loja (todas as variantes) ou nenhum; seleção antiga diferente fica preservada
+    const grupos = gruposDeProdutos(prods);
+    const atuais = det ? det.produtos.map(p => p.id).sort() : [];
+    let selAtual = '';
+    if (atuais.length) {
+      const g = grupos.find(x => x.ids.slice().sort().join() === atuais.join());
+      selAtual = g ? g.chave : 'atual';
+    }
+    const comDest = !!det && det.destinatarios.length > 0;           // 018: público e produto não mudam com destinatários
+    const travaPublico = travado || comDest;
     ui.modal(`
       <h2>${c ? 'Editar campanha' : 'Nova campanha'}</h2>
       <p class="muted small">Nada é disparado automaticamente: o sistema monta a lista e as mensagens; o envio é feito por uma pessoa e marcado aqui.${travado ? ' <strong>Campanha iniciada:</strong> mensagem, canal, cupom, objetivo e público ficam congelados (evidência do que foi enviado).' : ''}</p>
@@ -144,7 +174,12 @@
         <div class="form-grid">
           <label>Nome *<input name="nome" required maxlength="120" value="${ui.esc(c ? c.nome : '')}" placeholder="Ex.: Recompra Juice — novembro"></label>
           <label>Objetivo<select name="objetivo" ${travado ? 'disabled' : ''}>${opcoes(Object.entries(OBJ), obj0)}</select></label>
-          <label>Público<select name="publico" ${travado ? 'disabled' : ''}>${opcoes(Object.entries(PUBLICO), c ? c.publico : 'janela')}</select></label>
+          <label>Público<select name="publico" ${travaPublico ? 'disabled' : ''}>${opcoes(Object.entries(PUBLICO), c ? c.publico : 'janela')}</select></label>
+          <label>Produto em foco<select name="produto" id="cpfProduto" ${travaPublico ? 'disabled' : ''}>
+            <option value="" ${selAtual === '' ? 'selected' : ''}>Nenhum (qualquer produto)</option>
+            ${selAtual === 'atual' ? `<option value="atual" selected>Seleção atual: ${ui.esc(det.produtos.map(p => p.nome).join(', '))}</option>` : ''}
+            ${grupos.map(g => `<option value="${ui.esc(g.chave)}" ${g.chave === selAtual ? 'selected' : ''}>${ui.esc(g.nome)}${g.ids.length > 1 ? ` (${g.ids.length} variantes)` : ''}</option>`).join('')}
+          </select></label>
           <label>Canal<select name="canal" ${travado ? 'disabled' : ''}>${opcoes([['whatsapp', 'WhatsApp'], ['email', 'E-mail']], c ? c.canal : 'whatsapp')}</select></label>
           <label>Cupom<select name="cupom" ${travado ? 'disabled' : ''}>${opcoes(ativos.map(x => [x.id, x.codigo + (x.ativo ? '' : ' (inativo)')]), c ? c.cupomId || '' : '', 'Sem cupom (vendas não serão atribuídas)')}</select></label>
           <label>Janela de atribuição (dias)<input type="number" name="janela" min="1" max="180" step="1" value="${c ? c.janela : 30}"></label>
@@ -153,18 +188,33 @@
           <label>Meta de pedidos<input type="number" name="metaPedidos" min="1" step="1" value="${c && c.metaPedidos ? c.metaPedidos : ''}"></label>
           <label>Meta de receita (R$)<input type="number" name="metaReceita" min="0.01" step="0.01" value="${c && c.metaReceita ? c.metaReceita : ''}"></label>
         </div>
+        <p class="small muted" id="cpfPublicoAjuda"></p>
+        ${comDest && !travado ? '<p class="small aviso-inline" id="cpfTravaPublico">A campanha já tem destinatários: para mudar o público ou o produto em foco, remova antes os pendentes (botão "Remover pendentes").</p>' : ''}
         <p class="muted small">${ativos.length ? 'Cupons cadastrados no sistema (referência do código que já existe na Nuvemshop; o sistema não cria nem altera cupom na loja).' : 'Nenhum cupom cadastrado ainda. O administrador cadastra em "Cupons", na lista de campanhas, o código que já existe na Nuvemshop.'}</p>
         <label>Mensagem <small class="muted">variáveis: {primeiro_nome} {produto} {data_ultima_compra} {cupom}</small>
           <textarea name="mensagem" rows="5" maxlength="2000" required ${travado ? 'disabled' : ''}>${ui.esc(c ? c.mensagem : MODELOS[obj0])}</textarea></label>
         <div id="ckBox"></div>
         <label>Observações internas<textarea name="observacoes" rows="2" maxlength="2000">${ui.esc(c && c.observacoes || '')}</textarea></label>
-        ${c && c.aprovadaEm && !travado ? '<p class="small aviso-inline">Alterar mensagem, canal, cupom, objetivo ou público anula a aprovação: o administrador precisará aprovar de novo.</p>' : ''}
+        ${c && c.aprovadaEm && !travado ? '<p class="small aviso-inline">Alterar mensagem, canal, cupom, objetivo, público ou produto em foco anula a aprovação: o administrador precisará aprovar de novo.</p>' : ''}
       </form>
       <div class="auth-msg auth-msg-erro" id="cpfErro" role="alert" hidden></div>
       <div class="btn-row end"><button type="button" class="btn btn-ghost" data-close>Cancelar</button><button class="btn btn-primary" type="button" id="cpfSalvar">${c ? 'Salvar' : 'Salvar rascunho'}</button></div>`,
     m => {
       const f = m.querySelector('#cpf'), err = m.querySelector('#cpfErro'), btn = m.querySelector('#cpfSalvar');
       const upd = () => { m.querySelector('#ckBox').innerHTML = complianceBox(f.mensagem.value, f.canal.value); };
+      // explica o público resultante (e avisa produto sem ciclo de recompra)
+      const ajuda = () => {
+        const pub = f.publico.value, chave = f.produto.value, g = grupos.find(x => x.chave === chave);
+        const nome = g ? g.nome : chave === 'atual' ? 'os produtos atuais' : '';
+        let t = !nome ? `Público: ${PUBLICO[pub]} (qualquer produto).`
+          : RECOMPRA.includes(pub) ? `Só clientes que compraram ${nome} e estão "${PUBLICO[pub].toLowerCase()}" pela compra mais recente desse produto (qualquer variante).`
+          : pub === 'selecao_manual' ? `Só clientes que compraram ${nome} (pedido pago); você escolhe quem incluir.`
+          : `Só clientes "${PUBLICO[pub].toLowerCase()}" que compraram ${nome} (pedido pago).`;
+        if (g && RECOMPRA.includes(pub) && g.semCiclo) t += ` <strong>Atenção:</strong> ${g.semCiclo === g.ids.length ? 'este produto não tem' : `${g.semCiclo} variante(s) sem`} ciclo de recompra — defina na Tela Produtos, senão ${g.semCiclo === g.ids.length ? 'ninguém entra' : 'essas compras não contam'}.`;
+        m.querySelector('#cpfPublicoAjuda').innerHTML = t + ' Consentimento no canal continua obrigatório.';
+      };
+      ajuda();
+      if (!travaPublico) { f.publico.addEventListener('change', ajuda); f.produto.addEventListener('change', ajuda); }
       if (!travado) {
         f.objetivo.addEventListener('change', () => { if (!f.mensagem.value.trim() || Object.values(MODELOS).includes(f.mensagem.value)) f.mensagem.value = MODELOS[f.objetivo.value]; upd(); });
         f.canal.addEventListener('change', upd); f.mensagem.addEventListener('input', upd);
@@ -178,7 +228,12 @@
           metaPedidos: fd.get('metaPedidos') ? Number(fd.get('metaPedidos')) : null, metaReceita: fd.get('metaReceita') ? Number(fd.get('metaReceita')) : null,
           observacoes: String(fd.get('observacoes') || '').trim()
         };
-        if (!travado) Object.assign(d, { objetivo: fd.get('objetivo'), publico: fd.get('publico'), canal: fd.get('canal'), cupomId: fd.get('cupom') || null, mensagem: String(fd.get('mensagem') || '').trim() });
+        if (!travado) Object.assign(d, { objetivo: fd.get('objetivo'), canal: fd.get('canal'), cupomId: fd.get('cupom') || null, mensagem: String(fd.get('mensagem') || '').trim() });
+        if (!travaPublico) d.publico = fd.get('publico');
+        // produtos: só envia quando mudou (troca atômica no banco)
+        const chave = travaPublico ? selAtual : String(fd.get('produto') || '');
+        const novos = chave === 'atual' ? atuais : chave ? (grupos.find(x => x.chave === chave) || { ids: [] }).ids.slice().sort() : [];
+        const mudouProduto = !travaPublico && novos.join() !== atuais.join();
         const erros = [];
         if (d.nome.length < 3 || d.nome.length > 120) erros.push('Nome: de 3 a 120 caracteres.');
         if (!Number.isInteger(d.janela) || d.janela < 1 || d.janela > 180) erros.push('Janela de atribuição: de 1 a 180 dias.');
@@ -195,8 +250,20 @@
           let id = c && c.id;
           if (c) await R().campanhaAtualizar(c.id, c.atualizadoEm, d);
           else id = await R().campanhaCriar(d);
+          let avisoProduto = '';
+          if (mudouProduto) {
+            try {
+              const rp = await R().campanhaDefinirProdutos(id, novos);
+              if (rp && rp.aprovacao_anulada) avisoProduto = ' O produto mudou: a aprovação foi anulada.';
+            } catch (e2) {
+              console.error(e2); avisarAlteracao(); ui.closeModal(); estado.lista = null;
+              ui.toast(`Campanha salva, mas o produto em foco não foi gravado: ${(e2 && e2.message) || 'erro inesperado'}. Abra "Editar" e tente de novo.`, 'warn');
+              if (c) carregarDetalhe(id); else location.hash = '#/campanhas/' + id;
+              return;
+            }
+          }
           avisarAlteracao();
-          ui.closeModal(); ui.toast(c ? 'Campanha salva.' : 'Campanha salva como rascunho.');
+          ui.closeModal(); ui.toast((c ? 'Campanha salva.' : 'Campanha salva como rascunho.') + avisoProduto);
           estado.lista = null;
           if (c) carregarDetalhe(id); else location.hash = '#/campanhas/' + id;
         } catch (e) {
@@ -225,7 +292,7 @@
       ${ficticia ? '<div class="aviso-ficticio" role="note" id="avisoCampanhaFicticia"><strong>CAMPANHA FICTÍCIA DE TESTE</strong> — somente leitura.</div>' : ''}
       <section class="card" id="cabecalhoCampanha" data-camp="${ui.esc(c.id)}" data-lido="${det.lidoEm.getTime()}">
         <header class="card-head"><div><h2 class="display">${ui.esc(c.nome)}</h2>
-          <p class="muted small">${ui.esc(OBJ[c.objetivo] || c.objetivo)} · ${ui.esc(CANAL[c.canal] || c.canal)} · público ${ui.esc(PUBLICO[c.publico] || c.publico)} · cupom ${ui.esc(det.cupom ? det.cupom.codigo : '—')}
+          <p class="muted small">${ui.esc(OBJ[c.objetivo] || c.objetivo)} · ${ui.esc(CANAL[c.canal] || c.canal)} · público ${ui.esc(PUBLICO[c.publico] || c.publico)}${det.produtos.length ? ` · produto <strong id="produtoFoco">${ui.esc(nomeDoFoco(det.produtos))}</strong>` : ''} · cupom ${ui.esc(det.cupom ? det.cupom.codigo : '—')}
             · período ${ui.date(c.dataInicio)} a ${ui.date(c.dataFim)} · janela de ${ui.num(c.janela)} dias · criada em ${ui.date(c.criadaEm)} por ${ui.esc(c.criadaPor)}</p></div>
           <div class="btn-row">${ui.badge(st, tone)}
             <button class="btn btn-ghost btn-sm" id="atualizarCampanha" type="button" title="Reler do banco">Atualizar</button>
@@ -235,7 +302,7 @@
         <div class="kpi-grid kpi-grid-5" id="kpisCampanha">
           ${ui.kpi({ label: 'Destinatários', value: ui.num(r.destinatarios), hint: r.bloqueados ? `${ui.num(r.bloqueados)} bloqueados` : '' })}
           ${ui.kpi({ label: 'Enviados (manual)', value: ui.num(r.enviados), hint: r.pendentes ? `${ui.num(r.pendentes)} pendentes` : '' })}
-          ${ui.kpi({ label: 'Clientes que compraram', value: semCupom ? '—' : ui.num(r.compradores), hint: semCupom ? 'sem cupom: não atribuído' : `${ui.num(r.pedidos)} pedidos` })}
+          ${ui.kpi({ label: 'Clientes que compraram', value: semCupom ? '—' : ui.num(r.compradores), hint: semCupom ? 'sem cupom: não atribuído' : `${ui.num(r.pedidos)} pedidos${det.produtos.length ? ` · ${ui.num(r.pedidosProdutoFoco)} com o produto` : ''}` })}
           ${ui.kpi({ label: 'Conversão', value: semCupom ? '—' : ui.esc(ui.pct(r.taxa)) })}
           ${ui.kpi({ label: 'Receita atribuída', value: semCupom ? '—' : ui.esc(ui.brl(r.receita)), hint: r.usosForaDoPublico ? `+${r.usosForaDoPublico} usos do cupom fora do público (não somados)` : '' })}
         </div>
@@ -250,7 +317,7 @@
             : `<p class="small" id="infoAprovacao">Para marcar envios, um <strong>administrador</strong> precisa revisar e aprovar este conteúdo exato. O filtro automático não substitui essa revisão.</p>
                ${admin && editavel ? `<form class="form" id="formAprovar" novalidate><label>O que foi revisado *<input name="obs" maxlength="1000" placeholder="Ex.: texto sem alegação de saúde; cupom confere com a loja"></label>
                  <div class="btn-row end"><button class="btn btn-primary btn-sm" type="button" id="aprovarCamp">Aprovar conteúdo</button></div></form>` : ''}`}
-          ${det.produtos.length ? `<p class="small muted">Produto(s) em foco: ${det.produtos.map(p => ui.esc(p.nome)).join(', ')}</p>` : ''}
+          ${det.produtos.length ? `<p class="small muted">Produto(s) em foco: ${det.produtos.map(p => ui.esc(p.nome)).join(', ')}. Público: só quem comprou${RECOMPRA.includes(c.publico) ? ', pela compra mais recente desse produto' : ''}.</p>` : ''}
           ${c.observacoes ? `<p class="small muted">Observações: ${ui.esc(c.observacoes)}</p>` : ''}
         </article>
         <article class="card"><header class="card-head"><h2>Como usar</h2></header>
@@ -265,7 +332,8 @@
       </section>
       <section class="card" id="cardDestinatarios"><header class="card-head"><h2>Destinatários</h2><span class="muted small">${ui.num(det.destinatarios.length)} contatos</span></header>
         ${editavel ? `<div class="btn-row"><button class="btn btn-ghost btn-sm" id="incluirDest" type="button">Incluir destinatários</button>
-          ${det.destinatarios.some(x => x.situacao !== 'enviado') ? '<button class="btn btn-ghost btn-sm" id="revalidarDest" type="button">Revalidar permissões</button>' : ''}</div>` : ''}
+          ${det.destinatarios.some(x => x.situacao !== 'enviado') ? '<button class="btn btn-ghost btn-sm" id="revalidarDest" type="button">Revalidar permissões</button>' : ''}
+          ${c.status === 'rascunho' && det.destinatarios.length && !det.destinatarios.some(x => x.situacao === 'enviado') ? '<button class="btn btn-ghost btn-sm" id="removerPendentes" type="button">Remover pendentes</button>' : ''}</div>` : ''}
         ${!aprovada && pend.length && editavel ? '<p class="small aviso-inline">Envios só podem ser marcados depois da aprovação do administrador.</p>' : ''}
         ${det.destinatarios.length ? `<div class="table-wrap"><table id="tabelaDestinatarios"><thead><tr><th>Cliente</th><th>Prévia da mensagem</th><th>Situação</th><th></th></tr></thead><tbody>
         ${det.destinatarios.map(d => {
@@ -294,9 +362,10 @@
   function abrirInclusao(det) {
     const c = det.campanha;
     ui.modal(`<h2>Incluir destinatários</h2>
-      <p class="small">Clientes <strong>reais</strong> com permissão atual de marketing por ${ui.esc(CANAL[c.canal])}. O banco confere de novo cada um ao incluir e recusa quem revogou, se opôs, está em "não contatar" ou foi anonimizado.</p>
+      <p class="small" id="incPublico">Público da campanha: <strong>${ui.esc(PUBLICO[c.publico] || c.publico)}</strong>${det.produtos.length ? ` · só quem comprou <strong>${ui.esc(nomeDoFoco(det.produtos))}</strong>${RECOMPRA.includes(c.publico) ? ' (situação pela compra mais recente desse produto)' : ''}` : ''}.
+        Para outro público ou produto, edite a campanha.</p>
+      <p class="small">Só clientes <strong>reais</strong> com permissão atual de marketing por ${ui.esc(CANAL[c.canal])}; um contato por pessoa. O banco confere de novo cada um ao incluir e recusa quem está fora do público, revogou, se opôs, está em "não contatar" ou foi anonimizado.</p>
       <div class="form"><div class="form-grid">
-        <label>Público<select id="incPublico">${opcoes(Object.entries(PUBLICO), c.publico)}</select></label>
         <label>Buscar por nome<input type="search" id="incBusca" maxlength="80" placeholder="opcional"></label></div></div>
       <div id="incLista" class="small" aria-busy="true"><p class="muted">Carregando candidatos…</p></div>
       <div class="auth-msg auth-msg-erro" id="incErro" role="alert" hidden></div>
@@ -309,18 +378,17 @@
         const meu = ++g;
         lista.innerHTML = '<p class="muted">Carregando candidatos…</p>';
         try {
-          const cands = (await R().campanhaCandidatos({ publico: m.querySelector('#incPublico').value, canal: c.canal, q: m.querySelector('#incBusca').value })).filter(x => !ja.has(x.id));
+          const cands = (await R().campanhaCandidatos(c.id, m.querySelector('#incBusca').value)).filter(x => !ja.has(x.id));
           if (meu !== g) return;
           lista.removeAttribute('aria-busy');
           lista.innerHTML = cands.length ? `<label class="check"><input type="checkbox" id="incTodos" checked> Selecionar todos (${ui.num(cands.length)})</label>
             <ul class="list-plain" id="incCandidatos">${cands.map(x => `<li><label class="check"><input type="checkbox" name="cli" value="${ui.esc(x.id)}" checked> ${ui.esc(x.nome)} <small class="muted">${ui.esc(x.detalhe || '')}</small></label></li>`).join('')}</ul>`
-            : '<p class="muted" id="incNenhum">Nenhum cliente elegível neste público (ou todos já estão na campanha).</p>';
+            : `<p class="muted" id="incNenhum">Nenhum cliente do público com permissão no ${ui.esc(CANAL[c.canal])} (ou todos já estão na campanha).${det.produtos.length && RECOMPRA.includes(c.publico) && det.produtos.some(p => !p.ciclo) ? ' Confira o ciclo de recompra do produto na Tela Produtos.' : ''}</p>`;
           const todos = lista.querySelector('#incTodos');
           if (todos) todos.addEventListener('change', () => lista.querySelectorAll('[name=cli]').forEach(x => { x.checked = todos.checked; }));
           btn.disabled = !cands.length;
         } catch (e) { if (meu === g) { lista.innerHTML = `<p class="aviso-inline">${msgErro(e)}</p>`; btn.disabled = true; } }
       };
-      m.querySelector('#incPublico').addEventListener('change', carregar);
       m.querySelector('#incBusca').addEventListener('input', () => { clearTimeout(tb); tb = setTimeout(carregar, 350); });
       carregar();
       btn.addEventListener('click', async () => {
@@ -331,7 +399,7 @@
           const r = await R().campanhaIncluir(c.id, ids);
           const recus = Object.entries(r.recusados_por_motivo || {}).map(([k, n]) => `${n} ${MOTIVO[k] || k}`).join(', ');
           avisarAlteracao(); ui.closeModal();
-          ui.toast(`${r.incluidos} incluído(s).${r.mesma_pessoa ? ` ${r.mesma_pessoa} já representado(s) (mesma pessoa).` : ''}${recus ? ` Recusados pelo banco: ${recus}.` : ''}`, recus ? 'warn' : 'ok');
+          ui.toast(`${r.incluidos} incluído(s).${r.mesma_pessoa ? ` ${r.mesma_pessoa} já representado(s) (mesma pessoa ou mesmo contato).` : ''}${recus ? ` Recusados pelo banco: ${recus}.` : ''}`, recus ? 'warn' : 'ok');
           recarregarTudo(c.id);
         } catch (e) { console.error(e); err.textContent = (e && e.message) || 'Erro inesperado.'; err.hidden = false; btn.disabled = false; btn.textContent = 'Incluir selecionados'; }
       });
@@ -434,6 +502,15 @@
         r => (r && r.resultado === 'bloqueado' ? `Não registrado: a permissão mudou (${MOTIVO[r.motivo] || r.motivo}). O contato foi bloqueado nesta campanha.`
           : r && r.resultado === 'ja_enviado' ? 'Este envio já estava registrado.' : 'Envio registrado.'), c.id);
     }));
+    on('#removerPendentes', async b => {
+      const alvo = det.destinatarios.filter(x => x.situacao !== 'enviado');
+      if (!confirmar(b, `Remover os ${alvo.length} destinatário(s) não enviados? Depois você pode mudar o público ou o produto e incluir de novo.`)) return;
+      b.disabled = true; let n = 0, erro = null;
+      for (const d of alvo) { try { await R().campanhaRemoverDestinatario(d.id); n++; } catch (e) { erro = e; break; } }
+      avisarAlteracao();
+      ui.toast(erro ? `${n} removido(s); parou em um erro: ${erro.message}` : `${n} destinatário(s) removido(s).`, erro ? 'warn' : 'ok');
+      recarregarTudo(c.id);
+    });
     root.querySelectorAll('[data-remover]').forEach(b => b.addEventListener('click', () => {
       acao(b, () => R().campanhaRemoverDestinatario(b.dataset.remover), 'Destinatário removido da campanha.', c.id);
     }));
