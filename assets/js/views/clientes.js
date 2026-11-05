@@ -472,7 +472,8 @@
           <div class="form-grid"><label>Meio de coleta *<select name="meio">${opcoes(MEIOS, '', '—')}</select></label>
             <label>Onde conferir a prova *<input name="evidencia" maxlength="500" placeholder="Ex.: print salvo na pasta LGPD/2026/…"></label></div>
           <label>Texto de consentimento apresentado *<select name="texto">${textos.length ? textos.map(t => `<option value="${t.id}">${ui.esc(t.versao)} · ${t.canal ? ui.esc(CANAIS[t.canal]) : 'todos os canais'} · desde ${dataLocal(t.vigente_desde)}</option>`).join('') : '<option value="">— nenhum texto vigente —</option>'}</select></label>
-          ${!textos.length ? `<p class="small aviso-inline">Não há texto de consentimento real vigente. ${admin() ? '<button class="btn btn-ghost btn-sm" type="button" id="cadTexto">Cadastrar texto</button>' : 'Peça ao administrador para cadastrar o texto vigente.'}</p>` : ''}
+          ${!textos.length ? `<p class="small aviso-inline">Não há texto de consentimento real vigente. ${admin() ? '<button class="btn btn-ghost btn-sm" type="button" id="cadTexto">Cadastrar texto</button>' : 'Peça ao administrador para cadastrar o texto vigente.'}</p>`
+            : admin() ? `<p class="small"><button class="btn btn-ghost btn-sm" type="button" id="cadTexto">Cadastrar outro texto</button> <span class="muted">Ex.: o texto da newsletter da loja (versão começando com NUVEMSHOP-NEWSLETTER-).</span></p>` : ''}
         </div>
         <label>Data em que ocorreu<input name="data" type="date" max="${an().iso(an().today())}"><small class="muted">em branco = agora</small></label>
         <p class="small muted">A permissão é registrada no histórico (não se edita nem apaga). Registrar uma permissão não envia nenhuma mensagem.</p>

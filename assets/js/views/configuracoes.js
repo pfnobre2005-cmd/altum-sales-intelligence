@@ -56,6 +56,10 @@
       ${linha('Pedidos', o, [['cliente indisponível', o.cliente_indisponivel], ['suprimidos', o.suprimidos], ['mudaram de status', o.mudaram_de_status], ['itens sem produto', o.itens_sem_produto], ['reembolso parcial', o.parcialmente_reembolsados]])}
       </tbody></table></div>
       ${status ? `<p class="small">Pedidos por status: ${status}. Faturamento considera só os pagos.</p>` : ''}
+      ${c.marketing ? `<p class="small" id="nuvemshopNewsletter">Newsletter (e-mail): ${[['inscrições registradas', c.marketing.concedidas], ['cancelamentos registrados', c.marketing.revogadas],
+          ['pendentes de comprovação', c.marketing.pendentes_sem_comprovacao], ['cancelamentos não aplicados', c.marketing.revogacoes_nao_aplicadas],
+          ['recusa ou supressão anterior', c.marketing.conflitos], ['erros', c.marketing.erros]].filter(([, v]) => Number(v) > 0).map(([l, v]) => `${l}: <strong>${n0(v)}</strong>`).join(' · ') || 'nenhuma mudança'}.
+        <span class="muted">Só vira permissão de e-mail com a data da inscrição e o texto da newsletter da loja cadastrado antes dela. WhatsApp não é alterado.</span></p>` : ''}
       ${Number(p.novos) > 0 ? `<p class="small muted">${n0(p.novos)} produto(s) novo(s) chegam sem ciclo de recompra: defina o ciclo na <a href="#/produtos" class="link">Tela Produtos</a> para gerar oportunidades.</p>` : ''}`;
   }
 
@@ -183,59 +187,17 @@
     m => m.querySelector('#confirmarSincronizacao').addEventListener('click', () => { ui.closeModal(); sincronizar('execucao'); }));
   }
 
-  // Configurações verdadeiras: a tela nunca usa A.store.db.regras para valores reais.
-  const reais = { dados: null, erro: null, carregando: false, salvando: false };
-  async function carregarRegras() {
-    if (reais.carregando || reais.salvando) return;
-    reais.carregando = true;
-    reais.erro = null;
-    try { reais.dados = await A.repositorio.regrasReais(); }
-    catch (e) { reais.dados = null; reais.erro = e.message || 'Falha ao carregar regras reais.'; }
-    finally { reais.carregando = false; }
-    if (naTela()) A.router.render();
-  }
-  async function gravarRegras(form) {
-    if (reais.salvando || !A.session.isAdmin() || !reais.dados) return;
-    const botao = form.querySelector('button[type="submit"]');
-    const fd = new FormData(form);
-    const valores = {};
-    for (const k of ['inativoAposDias', 'fidelidadeMinPedidos', 'janelaAntesDias', 'janelaDepoisDias']) {
-      const bruto = String(fd.get(k) || '').trim();
-      if (!/^\d+$/.test(bruto)) { ui.toast('Informe números inteiros em todos os campos.'); return; }
-      valores[k] = Number(bruto);
-    }
-    reais.salvando = true;
-    if (botao) { botao.disabled = true; botao.textContent = 'Salvando…'; }
-    try {
-      await A.repositorio.salvarRegrasReais(reais.dados, valores);
-      // Leitura posterior confirma que a alteração persistiu no servidor.
-      const conferidas = await A.repositorio.regrasReais();
-      if (Object.keys(valores).some(k => conferidas[k] !== valores[k]))
-        throw new Error('Não foi possível confirmar os valores gravados. Atualize a página e confira as regras.');
-      reais.dados = conferidas;
-      reais.erro = null;
-      ui.toast('Regras reais salvas e confirmadas no Supabase.');
-      window.dispatchEvent(new CustomEvent('altum:dados-alterados', { detail: { origem: 'configuracoes' } }));
-    } catch (e) {
-      reais.erro = e.message || 'Não foi possível salvar as regras no Supabase.';
-      ui.toast(reais.erro);
-    } finally {
-      reais.salvando = false;
-      if (naTela()) A.router.render();
-    }
-  }
-
   A.views.configuracoes = {
     title: 'Integrações & dados',
     render() {
-      const db = A.store.db, admin = A.session.isAdmin(), r = reais.dados;
+      const db = A.store.db, admin = A.session.isAdmin(), r = db.regras;
       const dis = admin ? '' : 'disabled';
       return `
       <section class="grid-3">
         <article class="card integ"><div class="integ-head"><h3>Supabase</h3>${ui.badge('Conectado', 'sage')}</div>
-          <p class="small">Login com duas etapas, permissões e dados reais do Supabase para todos os módulos comerciais.</p></article>
-        <article class="card integ"><div class="integ-head"><h3>Nuvemshop</h3>${ui.badge(nuv.painel && nuv.painel.estado && nuv.painel.estado.agendamento_ativo ? 'Automática ligada' : 'Automação desligada / verificando', nuv.painel && nuv.painel.estado && nuv.painel.estado.agendamento_ativo ? 'sage' : 'sand')}</div>
-          <p class="small">Produtos, clientes e pedidos via API oficial, somente leitura. Verifique o status e o histórico da sincronização abaixo.</p></article>
+          <p class="small">Login com 2 etapas, banco de dados e regras de acesso. Dashboard, Clientes, Produtos e Recompra já leem o banco.</p></article>
+        <article class="card integ"><div class="integ-head"><h3>Nuvemshop</h3>${ui.badge('Importação manual', 'sand')}</div>
+          <p class="small">Produtos, clientes e pedidos via API oficial, só leitura, com token guardado só no servidor. Atualização automática: desligada até validarmos a 1ª importação.</p></article>
         <article class="card integ"><div class="integ-head"><h3>WhatsApp / e-mail</h3>${ui.badge('Fora da V1', 'muted')}</div>
           <p class="small">Sem disparo automático na primeira versão. Futuro: somente soluções oficiais, com consentimento e descadastro.</p></article>
       </section>
@@ -243,41 +205,42 @@
       ${secaoNuvemshop(admin)}
 
       <section class="card">
-        <header class="card-head"><h2>Base local de teste — NÃO é backup do Supabase</h2>${ui.badge('Dados fictícios', 'warn')}</header>
+        <header class="card-head"><h2>Fonte dos dados</h2>${ui.badge('Dados fictícios', 'warn')}</header>
         <p>${ui.esc(db.meta.aviso)} Gerada em ${ui.date(db.meta.geradoEm)}: ${db.clientes.length} clientes, ${db.pedidos.length} pedidos, ${db.leads.length} contatos no funil. Fica salva apenas neste navegador.</p>
         <div class="btn-row">
-          <button class="btn btn-ghost" id="exportAll">Exportar dados FICTÍCIOS (JSON)</button>
+          <button class="btn btn-ghost" id="exportAll">Exportar backup (JSON)</button>
           <button class="btn btn-danger" id="resetDb" ${dis}>Recriar base fictícia</button>
         </div>
         ${admin ? '' : '<p class="muted small">Recriar a base é restrito ao administrador.</p>'}
       </section>
 
       <section class="grid-2">
-        <article class="card" id="regrasReais">
-          <header class="card-head"><h2>Regras de segmentação — Supabase REAL</h2>${ui.badge('Supabase', 'sage')}</header>
-          ${reais.erro ? `<p class="aviso-inline" role="alert">${ui.esc(reais.erro)}</p>` : ''}
-          ${!r ? `<p class="muted small" aria-busy="${reais.carregando}">Regras indisponíveis até confirmar a leitura do banco.</p><button class="btn btn-ghost" id="recarregarRegras" type="button">Tentar novamente</button>` : `
+        <article class="card">
+          <header class="card-head"><h2>Regras de segmentação</h2></header>
           <form id="rulesForm" class="form">
             <div class="form-grid">
-              <label>Inativo após (dias sem pedido)<input type="number" min="15" max="720" step="1" required name="inativoAposDias" value="${r.inativoAposDias}" ${dis}></label>
-              <label>Fidelização a partir de (pedidos)<input type="number" min="2" max="20" step="1" required name="fidelidadeMinPedidos" value="${r.fidelidadeMinPedidos}" ${dis}></label>
-              <label>Janela: dias antes da reposição<input type="number" min="0" max="60" step="1" required name="janelaAntesDias" value="${r.janelaAntesDias}" ${dis}></label>
-              <label>Janela: dias depois da reposição<input type="number" min="0" max="120" step="1" required name="janelaDepoisDias" value="${r.janelaDepoisDias}" ${dis}></label>
+              <label>Inativo após (dias sem pedido)<input type="number" min="15" max="720" name="inativoAposDias" value="${r.inativoAposDias}" ${dis}></label>
+              <label>Fidelização a partir de (pedidos)<input type="number" min="2" max="20" name="fidelidadeMinPedidos" value="${r.fidelidadeMinPedidos}" ${dis}></label>
+              <label>Janela: dias antes da reposição<input type="number" min="0" max="60" name="janelaAntesDias" value="${r.janelaAntesDias}" ${dis}></label>
+              <label>Janela: dias depois da reposição<input type="number" min="0" max="120" name="janelaDepoisDias" value="${r.janelaDepoisDias}" ${dis}></label>
             </div>
-            ${admin ? '<div class="btn-row end"><button class="btn btn-ghost" id="recarregarRegras" type="button">Atualizar do banco</button><button class="btn btn-primary" type="submit">Salvar regras reais</button></div>' : '<p class="small muted">Somente administradores podem alterar estas regras.</p>'}
-          </form>`}
-          <p class="small muted">As regras impactam Dashboard, segmentação, Inteligência e oportunidades de recompra. A gravação exige administrador com MFA.</p>
+            ${admin ? '<div class="btn-row end"><button class="btn btn-primary">Salvar regras</button></div>' : ''}
+          </form>
         </article>
         <article class="card">
           <header class="card-head"><h2>Ciclo de recompra por produto</h2></header>
-          <p class="small">Os ciclos reais são editados individualmente na <a class="link" href="#/produtos">Tela Produtos</a>, com os custos e históricos preservados.</p>
-          <p class="muted small">Revise os produtos importados que ainda estão com 15 dias ou sem ciclo. Não use os valores fictícios desta tela.</p>
-          <a class="btn btn-ghost" href="#/produtos">Abrir Produtos</a>
+          <p class="muted small">Em quantos dias um pedido de 1 unidade costuma ser reposto. <b>Valores de exemplo — confirme com o rendimento real de cada embalagem.</b></p>
+          <form id="cycleForm" class="form">
+            <div class="table-wrap"><table><thead><tr><th>Produto</th><th class="num">Ciclo (dias)</th></tr></thead><tbody>
+              ${db.produtos.map(p => `<tr><td>${ui.esc(p.nome)}</td><td class="num"><input class="input-sm" type="number" min="1" max="365" name="${p.id}" value="${p.cicloDias}" ${dis}></td></tr>`).join('')}
+            </tbody></table></div>
+            ${admin ? '<div class="btn-row end"><button class="btn btn-primary">Salvar ciclos</button></div>' : ''}
+          </form>
         </article>
       </section>
 
       <section class="card">
-        <header class="card-head"><h2>Registro local dos dados fictícios</h2><span class="muted small">não é auditoria do Supabase</span></header>
+        <header class="card-head"><h2>Registro de alterações</h2><span class="muted small">últimas 50</span></header>
         ${admin ? `<div class="table-wrap"><table><thead><tr><th>Quando</th><th>Perfil</th><th>Ação</th><th>Detalhe</th></tr></thead><tbody>
           ${db.auditoria.slice(0, 50).map(a => `<tr><td class="nowrap">${new Date(a.data).toLocaleString('pt-BR')}</td><td>${ui.esc(a.usuario)}</td><td>${ui.esc(a.acao)}</td><td>${ui.esc(a.detalhe)}</td></tr>`).join('')}
         </tbody></table></div>` : ui.empty('Visível apenas para administradores.')}
@@ -301,11 +264,21 @@
           <div class="btn-row end"><button class="btn btn-ghost" data-close>Cancelar</button><button class="btn btn-danger" id="confReset">Recriar</button></div>`,
         m => m.querySelector('#confReset').addEventListener('click', () => { A.store.reset(); ui.closeModal(); ui.toast('Base fictícia recriada.'); A.router.render(); }));
       });
-      if (!reais.dados && !reais.erro && !reais.carregando) carregarRegras();
-      const rec = root.querySelector('#recarregarRegras');
-      if (rec) rec.addEventListener('click', carregarRegras);
       const rf = root.querySelector('#rulesForm');
-      if (rf && A.session.isAdmin()) rf.addEventListener('submit', e => { e.preventDefault(); gravarRegras(rf); });
+      rf.addEventListener('submit', e => {
+        e.preventDefault(); if (!A.session.isAdmin()) return;
+        const fd = new FormData(rf); const patch = {};
+        ['inativoAposDias', 'fidelidadeMinPedidos', 'janelaAntesDias', 'janelaDepoisDias'].forEach(k => { const v = parseInt(fd.get(k), 10); if (!isNaN(v)) patch[k] = v; });
+        A.store.setRegras(patch);
+        ui.toast('Regras salvas.'); A.router.render();
+      });
+      const cf = root.querySelector('#cycleForm');
+      cf.addEventListener('submit', e => {
+        e.preventDefault(); if (!A.session.isAdmin()) return;
+        const fd = new FormData(cf);
+        A.store.setCiclos(Object.fromEntries(A.store.db.produtos.map(p => [p.id, parseInt(fd.get(p.id), 10)])));
+        ui.toast('Ciclos salvos.'); A.router.render();
+      });
     }
   };
 })(window.ALTUM);
