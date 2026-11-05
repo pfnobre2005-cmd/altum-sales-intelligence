@@ -1028,7 +1028,7 @@
         .eq('campanha_id', id).order('nome', { nullsFirst: false }).order('id'), 'os destinatários'),
       lerTudo(o => sb.from('v_atribuicao_pedidos').select('pedido_id, cliente_id, data_pedido, total, cupom_codigo, enviado_em', o)
         .eq('campanha_id', id).order('data_pedido', { ascending: false }).order('pedido_id'), 'os pedidos atribuídos'),
-      lerTudo(o => sb.from('campanha_produtos').select('produto_id, produtos(nome, sku)', o).eq('campanha_id', id).order('produto_id'), 'os produtos da campanha'),
+      lerTudo(o => sb.from('campanha_produtos').select('produto_id, produtos(nome, sku, ciclo_recompra_dias, nuvemshop_produto_id)', o).eq('campanha_id', id).order('produto_id'), 'os produtos da campanha'),
       perfisVisiveis()
     ]);
     if (!c) throw new ErroDados('nao_encontrado', 'Campanha não encontrada.');
@@ -1059,7 +1059,9 @@
       },
       resultado: res ? mapearResultado(res) : null,
       cupom: cupom ? { id: cupom.id, codigo: cupom.codigo, tipo: cupom.tipo, valor: cupom.valor === null ? null : num(cupom.valor), ativo: cupom.ativo, fonte: cupom.fonte } : null,
-      produtos: prods.map(p => ({ id: p.produto_id, nome: p.produtos ? p.produtos.nome : '—', sku: p.produtos ? p.produtos.sku : null })),
+      produtos: prods.map(p => ({ id: p.produto_id, nome: p.produtos ? p.produtos.nome : '—', sku: p.produtos ? p.produtos.sku : null,
+                                  ciclo: p.produtos ? p.produtos.ciclo_recompra_dias : null,
+                                  produtoLoja: p.produtos && p.produtos.nuvemshop_produto_id !== null ? String(p.produtos.nuvemshop_produto_id) : null })),
       destinatarios: dest.map(d => ({ id: d.id, clienteId: d.cliente_id, nome: d.nome, situacao: d.situacao, motivo: d.motivo_bloqueio,
                                      incluidoEm: d.incluido_em, verificadoEm: d.verificado_em, enviadoEm: d.enviado_em, enviadoPor: d.enviado_em ? quem(d.enviado_por) : null,
                                      podeEnviar: d.pode_enviar_agora === true, ultimaCompra: ultima.get(d.cliente_id) || null })),
@@ -1127,28 +1129,28 @@
     return r;
   }
 
-  /** Candidatos REAIS do público, só quem tem permissão atual de marketing no canal (o banco confere de novo ao incluir). */
-  async function campanhaCandidatos(f) {
+  /** Candidatos do público GRAVADO na campanha (público + produtos em foco), com permissão atual no canal.
+   *  Regra única no banco (018: campanha_candidatos = a mesma da inclusão). Sem e-mail/telefone. */
+  async function campanhaCandidatos(campanhaId, q) {
     exigirCliente();
-    const canal = CANAIS_CAMPANHA.includes(f.canal) ? f.canal : null;
-    if (!canal) throw new ErroDados('validacao', 'Canal inválido.');
-    const pode = canal === 'email' ? 'pode_email' : 'pode_whatsapp';
-    const t = termoBusca(f.q);
-    if (f.publico === 'janela' || f.publico === 'atrasado') {
-      let q = sb.from('v_recompra_painel').select('cliente_id, cliente_nome, produto, reposicao_estimada').neq('cliente_fonte', 'ficticio')
-        .eq('situacao', f.publico).eq(pode, true);
-      if (t) q = q.ilike('cliente_nome', `*${t}*`);
-      const r = await lerUm(() => q.order('reposicao_estimada').order('cliente_id').limit(1000), 'os candidatos');
-      const vistos = new Map();
-      (r || []).forEach(x => { if (!vistos.has(x.cliente_id)) vistos.set(x.cliente_id, { id: x.cliente_id, nome: x.cliente_nome, detalhe: `${x.produto} · reposição ${x.reposicao_estimada}` }); });
-      return [...vistos.values()].slice(0, 500);
-    }
-    let q = sb.from('v_clientes_resumo').select('id, nome, cidade, uf, segmento, pedidos_pagos, ultima_compra, status_comercial')
-      .neq('fonte', 'ficticio').eq('anonimizado', false).neq('status_comercial', 'nao_contatar').eq(pode, true);
-    if (f.publico !== 'selecao_manual') q = q.eq('segmento', f.publico);
-    if (t) q = q.ilike('nome', `*${t}*`);
-    const r = await lerUm(() => q.order('nome').order('id').limit(500), 'os candidatos');
-    return (r || []).map(x => ({ id: x.id, nome: x.nome, detalhe: [x.cidade && `${x.cidade}/${x.uf || ''}`, `${num(x.pedidos_pagos)} pedidos`, x.ultima_compra && `última compra ${x.ultima_compra}`].filter(Boolean).join(' · ') }));
+    if (!UUID_RE.test(String(campanhaId || ''))) throw new ErroDados('validacao', 'Campanha inválida.');
+    const r = await rpc('campanha_candidatos', { p_campanha: campanhaId, p_busca: termoBusca(q) || null }, 'os candidatos');
+    return (r || []).map(x => ({ id: x.cliente_id, nome: x.nome, detalhe: x.detalhe || '' }));
+  }
+
+  /** Produtos reais ativos que podem entrar como "produto em foco" (variantes da loja agrupadas pela tela). */
+  async function produtosParaCampanha() {
+    exigirCliente();
+    const r = await lerTudo(o => sb.from('produtos').select('id, nome, sku, ciclo_recompra_dias, nuvemshop_produto_id, fonte', o)
+      .neq('fonte', 'ficticio').eq('ativo', true).order('nome').order('id'), 'os produtos');
+    return r.map(p => ({ id: p.id, nome: p.nome, sku: p.sku, ciclo: p.ciclo_recompra_dias, produtoLoja: p.nuvemshop_produto_id === null ? null : String(p.nuvemshop_produto_id) }));
+  }
+
+  /** Troca atômica dos produtos em foco (o banco confere origem, produto ativo, rascunho, destinatários e anula a aprovação). */
+  function campanhaDefinirProdutos(campanhaId, produtoIds) {
+    if (!UUID_RE.test(String(campanhaId || '')) || !Array.isArray(produtoIds) || produtoIds.some(x => !UUID_RE.test(String(x))))
+      return Promise.reject(new ErroDados('validacao', 'Produtos inválidos.'));
+    return rpc('campanha_definir_produtos', { p_campanha: campanhaId, p_produtos: produtoIds }, 'os produtos da campanha');
   }
 
   /** Cupons de UMA origem + códigos usados em pedidos pagos da loja que ainda não foram cadastrados. */
@@ -1481,6 +1483,8 @@
     campanhaMarcarEnvio,
     campanhaRemoverDestinatario,
     campanhaCandidatos,
+    produtosParaCampanha,
+    campanhaDefinirProdutos,
     cupons,
     cupomRegistrar,
     cupomAlterarStatus,
