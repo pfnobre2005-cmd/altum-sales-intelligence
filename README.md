@@ -76,3 +76,4 @@ docs/ARQUITETURA.md          arquitetura técnica
 
 - **Etapa 2**: criar a conta/projeto no Supabase (plano gratuito atende o início), criar os usuários (admin/operador) e copiar a URL e a **publishable key** (`sb_publishable_…`) para `config.js`.
 - **Etapa 3**: criar o aplicativo na Nuvemshop (Parceiros → aplicativo para a própria loja), autorizar na loja e guardar o token como *secret* da Edge Function — nunca no GitHub.
+Versão 0.13.3 — atualização da documentação de publicação.
