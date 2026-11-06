@@ -8,6 +8,9 @@
   const nm = { ocupado: false, resultado: null, erro: null };
   // Teste da conexão real (uma leitura feita pelo servidor). Separado da verificação da chave.
   const nmc = { ocupado: false, resultado: null, erro: null };
+  // Prévia da recompra por e-mail (0.13.3): só leitura, só contagens; automação DESLIGADA.
+  const prv = { produtos: null, erroProdutos: null, chave: '', ocupado: false, resultado: null, erro: null,
+                listas: null, erroListas: null, ocupadoListas: false };
   const ROTULO_PAGAMENTO = { paid: 'Pago', pending: 'Pendente', authorized: 'Autorizado', abandoned: 'Abandonado',
                              refunded: 'Reembolsado', voided: 'Cancelado', partially_paid: 'Pago parcialmente',
                              partially_refunded: 'Reembolsado parcialmente', outro: 'Outro' };
@@ -174,6 +177,90 @@
     finally { nmc.ocupado = false; }
     if (naTela()) A.router.render();
   }
+  // variantes do mesmo produto da loja juntas (mesma regra da Tela Campanhas)
+  function gruposProdutos(lista) {
+    const m = new Map();
+    lista.forEach(p => { const k = p.produtoLoja ? 'loja:' + p.produtoLoja : 'id:' + p.id;
+      if (!m.has(k)) m.set(k, { chave: k, nome: String(p.nome || '').split(' — ')[0].trim(), ids: [], semCiclo: 0 });
+      const g = m.get(k); g.ids.push(p.id); if (!p.ciclo) g.semCiclo++; });
+    return [...m.values()].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+  async function carregarProdutosPrevia() {
+    if (prv.produtos || prv.erroProdutos) return;
+    try {
+      prv.produtos = gruposProdutos(await A.repositorio.produtosParaCampanha());
+      const juice = prv.produtos.find(g => /juice\s*protein/i.test(g.nome));
+      prv.chave = juice ? juice.chave : (prv.produtos[0] ? prv.produtos[0].chave : '');
+    } catch (e) { prv.erroProdutos = (e && e.message) || 'Não foi possível ler os produtos.'; }
+    if (naTela()) A.router.render();
+  }
+  async function calcularPrevia(chave) {
+    if (prv.ocupado || !A.session.isAdmin()) return;
+    const g = (prv.produtos || []).find(x => x.chave === chave);
+    if (!g) return;
+    prv.chave = chave; prv.ocupado = true; prv.erro = null; prv.resultado = null;
+    if (naTela()) A.router.render();
+    try { prv.resultado = Object.assign(await A.repositorio.recompraEmailPrevia(g.ids), { produto: g.nome, semCiclo: g.semCiclo, variantes: g.ids.length }); }
+    catch (e) { prv.erro = (e && e.message) || 'Erro inesperado ao calcular a prévia.'; }
+    finally { prv.ocupado = false; }
+    if (naTela()) A.router.render();
+  }
+  async function analisarListas() {
+    if (prv.ocupadoListas || !A.session.isAdmin()) return;
+    prv.ocupadoListas = true; prv.erroListas = null; prv.listas = null;
+    if (naTela()) A.router.render();
+    try { prv.listas = await A.repositorio.nuvemMarketingListas(); }
+    catch (e) { prv.erroListas = (e && e.message) || 'Erro inesperado ao ler as listas.'; }
+    finally { prv.ocupadoListas = false; }
+    if (naTela()) A.router.render();
+  }
+  const ROTULO_CONTADOR = k => k.replace(/\./g, ' · ').replace(/_/g, ' ');
+  function secaoPreviaRecompra(admin) {
+    if (!admin) return '';
+    const r = prv.resultado, n = v => ui.num(Number(v) || 0);
+    const linha = (rot, v, cls) => `<tr${cls ? ` class="${cls}"` : ''}><td>${rot}</td><td class="num">${n(v)}</td></tr>`;
+    return `<section class="card" id="secaoPreviaRecompra">
+      <header class="card-head"><h2>Recompra por e-mail — prévia</h2>${ui.badge('Automação desligada', 'muted')}</header>
+      <p class="small"><strong>Só leitura.</strong> Calcula quantos clientes seriam elegíveis pelas regras de consentimento do CRM. Nada é gravado, nenhum contato é enviado ao Nuvem Marketing e nenhum e-mail é disparado.</p>
+      ${prv.erroProdutos ? `<p class="aviso-inline">${ui.esc(prv.erroProdutos)}</p>` : !prv.produtos ? '<p class="muted small" aria-busy="true">Carregando produtos…</p>' : `
+      <div class="form"><div class="form-grid">
+        <label>Produto<select id="previaProduto" ${prv.ocupado ? 'disabled' : ''}>${prv.produtos.map(g => `<option value="${ui.esc(g.chave)}" ${g.chave === prv.chave ? 'selected' : ''}>${ui.esc(g.nome)}${g.ids.length > 1 ? ` (${g.ids.length} variantes)` : ''}</option>`).join('')}</select></label>
+      </div></div>
+      <div class="btn-row"><button class="btn btn-primary btn-sm" type="button" id="calcularPrevia" ${prv.ocupado || !prv.produtos.length ? 'disabled' : ''}>${prv.ocupado ? 'Calculando…' : 'Calcular prévia'}</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="analisarListas" ${prv.ocupadoListas ? 'disabled' : ''}>${prv.ocupadoListas ? 'Lendo listas…' : 'Analisar listas do Nuvem Marketing'}</button></div>`}
+      ${prv.erro ? `<p class="aviso-inline" id="previaErro" role="alert">${ui.esc(prv.erro)}</p>` : ''}
+      ${r ? `<div id="previaResultado">
+        <p class="kpi-destaque" id="previaElegiveis"><strong>${n(r.janela.elegiveis_emails_unicos)}</strong> e-mail(s) elegível(is) para ${ui.esc(r.produto)} — clientes na janela de reposição com autorização de e-mail comprovada${Number(r.janela.elegiveis) !== Number(r.janela.elegiveis_emails_unicos) ? ` (${n(r.janela.elegiveis)} cadastros; repetidos contam uma vez)` : ''}.</p>
+        ${r.semCiclo ? `<p class="small aviso-inline">${r.semCiclo === r.variantes ? 'Este produto não tem' : `${r.semCiclo} variante(s) sem`} ciclo de recompra: defina na Tela Produtos, senão essas compras não entram na janela.</p>` : ''}
+        <div class="grid-2"><div class="table-wrap"><table id="previaFunil"><thead><tr><th>Etapa</th><th class="num">Clientes</th></tr></thead><tbody>
+          ${linha('Compraram (pedido pago, dados reais)', r.compradores)}
+          ${linha('Bloqueados: anonimizados', r.bloqueados.anonimizado, 'muted')}
+          ${linha('Bloqueados: "não contatar"', r.bloqueados.nao_contatar, 'muted')}
+          ${linha('Bloqueados: oposição', r.bloqueados.oposicao, 'muted')}
+          ${linha('<strong>Na janela de reposição</strong>', r.situacao.janela)}
+          ${linha('Recompra atrasada (fora desta prévia)', r.situacao.atrasado, 'muted')}
+          ${linha('Antes da janela', r.situacao.antes_da_janela, 'muted')}
+          ${linha('Inativos', r.situacao.inativo, 'muted')}
+          ${linha('Sem ciclo de recompra', r.situacao.sem_ciclo, 'muted')}
+        </tbody></table></div>
+        <div class="table-wrap"><table id="previaEmail"><thead><tr><th>Na janela — e-mail</th><th class="num">Clientes</th></tr></thead><tbody>
+          ${linha('<strong>Elegíveis (autorização de e-mail comprovada)</strong>', r.janela.elegiveis)}
+          ${linha('Descadastrados (revogaram ou recusaram e-mail)', r.janela.descadastrados, 'muted')}
+          ${linha('Sem autorização comprovada (inclui newsletter pendente)', r.janela.sem_autorizacao, 'muted')}
+          ${linha('Recusa em cadastro vinculado', r.janela.recusa_vinculada, 'muted')}
+          ${linha('Sem e-mail', r.janela.sem_email, 'muted')}
+        </tbody></table></div></div>
+        <p class="small muted">Janela: ${n(r.regras.janela_antes_dias)} dias antes a ${n(r.regras.janela_depois_dias)} dias depois da reposição estimada, pela compra mais recente do produto (qualquer variante). Calculado às ${r.em.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}. Descadastros feitos só dentro do Nuvem Marketing não aparecem aqui: serão conferidos contato a contato antes de qualquer envio.</p>
+      </div>` : ''}
+      ${prv.erroListas ? `<p class="aviso-inline" id="listasErro" role="alert">${ui.esc(prv.erroListas)}</p>` : ''}
+      ${prv.listas ? `<div id="listasNuvemMarketing"><h3>Listas no Nuvem Marketing <span class="muted small">(somente leitura${prv.listas.total !== null ? ` · total informado: ${n(prv.listas.total)}` : ''})</span></h3>
+        ${prv.listas.listas.length ? `<div class="table-wrap"><table id="tabelaListas"><thead><tr><th>Lista</th><th>Contadores informados pela API</th></tr></thead><tbody>
+          ${prv.listas.listas.map(l => `<tr><td>${ui.esc(l.nome || '(sem nome)')}${l.id ? ` <small class="muted">#${ui.esc(l.id)}</small>` : ''}</td>
+            <td>${Object.keys(l.contadores).length ? Object.entries(l.contadores).map(([k, v]) => `${ui.esc(ROTULO_CONTADOR(k))}: <strong>${n(v)}</strong>`).join(' · ') : '<span class="muted">a API não informou contadores</span>'}</td></tr>`).join('')}
+        </tbody></table></div>` : '<p class="muted small">Nenhuma lista devolvida pela API.</p>'}
+        <p class="small muted">Nenhuma lista foi criada ou alterada; nenhum contato foi lido nem enviado.</p></div>` : ''}
+    </section>`;
+  }
   function blocoNuvemMarketing(admin) {
     if (!admin) return '';
     const r = nm.resultado;
@@ -283,6 +370,8 @@
 
       ${secaoNuvemshop(admin)}
 
+      ${secaoPreviaRecompra(admin)}
+
       <section class="card">
         <header class="card-head"><h2>Base local de teste — NÃO é backup do Supabase</h2>${ui.badge('Dados fictícios', 'warn')}</header>
         <p>${ui.esc(db.meta.aviso)} Gerada em ${ui.date(db.meta.geradoEm)}: ${db.clientes.length} clientes, ${db.pedidos.length} pedidos, ${db.leads.length} contatos no funil. Fica salva apenas neste navegador.</p>
@@ -331,6 +420,13 @@
       if (vm) vm.addEventListener('click', verificarNuvemMarketing);
       const tc = root.querySelector('#testarConexaoNuvemMarketing');
       if (tc) tc.addEventListener('click', testarConexaoNuvemMarketing);
+      if (A.session.isAdmin()) carregarProdutosPrevia();
+      const pp = root.querySelector('#previaProduto');
+      if (pp) pp.addEventListener('change', () => { prv.chave = pp.value; prv.resultado = null; prv.erro = null; A.router.render(); });
+      const cp = root.querySelector('#calcularPrevia');
+      if (cp) cp.addEventListener('click', () => calcularPrevia((root.querySelector('#previaProduto') || {}).value || prv.chave));
+      const al = root.querySelector('#analisarListas');
+      if (al) al.addEventListener('click', analisarListas);
       const pv = root.querySelector('#previaNuvemshop');
       if (pv) pv.addEventListener('click', () => sincronizar('previa'));
       const sn = root.querySelector('#sincronizarNuvemshop');

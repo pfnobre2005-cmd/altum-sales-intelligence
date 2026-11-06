@@ -1503,6 +1503,32 @@
     return { autenticada: true, listas: Number.isSafeInteger(n) && n >= 0 ? n : null, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
   }
 
+  /** Listas do Nuvem Marketing: SÓ metadados (id, nome, contadores informados pela API). Uma leitura; nada é alterado. */
+  async function nuvemMarketingListas() {
+    const d = await chamarNuvemMarketing({ acao: 'analisar_listas' }, 30000);
+    if (d.acao !== 'analisar_listas' || !Array.isArray(d.listas)) throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.3 dela foi publicada.');
+    const inteiro = n => (Number.isSafeInteger(n) && n >= 0 ? n : null);
+    return {
+      listas: d.listas.slice(0, 50).map(l => ({
+        id: l && l.id != null ? String(l.id).slice(0, 40) : null,
+        nome: l && typeof l.nome === 'string' ? l.nome.slice(0, 120) : null,
+        contadores: Object.fromEntries(Object.entries((l && l.contadores) || {}).filter(([k, v]) => /^[A-Za-z][A-Za-z0-9_.]{0,80}$/.test(k) && inteiro(v) !== null).slice(0, 20))
+      })),
+      total: inteiro(d.total), envioHabilitado: d.emailSendingEnabled === true, em: new Date()
+    };
+  }
+
+  /** Prévia da recompra por e-mail (só contagens; nada gravado). Só administrador com 2 etapas (o banco confere). */
+  async function recompraEmailPrevia(produtoIds) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem calcular a prévia.');
+    if (!Array.isArray(produtoIds) || !produtoIds.length || produtoIds.some(x => !UUID_RE.test(String(x))))
+      throw new ErroDados('validacao', 'Escolha um produto.');
+    const r = await rpc('recompra_email_previa', { p_produtos: produtoIds }, 'a prévia da recompra');
+    if (!r || typeof r !== 'object' || !r.janela || !r.situacao) throw new ErroDados('integracao', 'Resposta inesperada do banco. Confira se a migração 019 foi aplicada.');
+    return Object.assign({}, r, { em: new Date() });
+  }
+
   /** Painel: estado da loja e últimas execuções (o banco só mostra a administradores com 2 etapas). */
   async function nuvemshopPainel() {
     exigirCliente();
@@ -1578,6 +1604,8 @@
     nuvemshopSincronizar,
     nuvemMarketingVerificar,
     nuvemMarketingTestarConexao,
+    nuvemMarketingListas,
+    recompraEmailPrevia,
     nuvemshopPainel,
     urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2

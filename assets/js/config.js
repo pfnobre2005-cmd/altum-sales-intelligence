@@ -11,7 +11,7 @@ window.ALTUM = window.ALTUM || {};
 
 ALTUM.config = {
   appName: 'ALTUM Sales Intelligence',
-  version: '0.13.2-nuvem-marketing-api',
+  version: '0.13.3-recompra-previa',
   dataMode: 'misto',         // todas as telas: Supabase (dados fictícios só quando escolhidos)
   dashboard: {
     permitirFicticios: true  // botão "Ver dados fictícios de teste" (some sozinho quando não houver fictícios); false = esconde
