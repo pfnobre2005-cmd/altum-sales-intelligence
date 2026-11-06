@@ -10,7 +10,8 @@
   const nmc = { ocupado: false, resultado: null, erro: null };
   // Prévia da recompra por e-mail (0.13.3): só leitura, só contagens; automação DESLIGADA.
   const prv = { produtos: null, erroProdutos: null, chave: '', ocupado: false, resultado: null, erro: null,
-                listas: null, erroListas: null, ocupadoListas: false };
+                listas: null, erroListas: null, ocupadoListas: false,
+                formato: null, erroFormato: null, ocupadoFormato: false };
   const ROTULO_PAGAMENTO = { paid: 'Pago', pending: 'Pendente', authorized: 'Autorizado', abandoned: 'Abandonado',
                              refunded: 'Reembolsado', voided: 'Cancelado', partially_paid: 'Pago parcialmente',
                              partially_refunded: 'Reembolsado parcialmente', outro: 'Outro' };
@@ -214,6 +215,32 @@
     finally { prv.ocupadoListas = false; }
     if (naTela()) A.router.render();
   }
+  async function descobrirFormato() {
+    if (prv.ocupadoFormato || !A.session.isAdmin()) return;
+    const g = (prv.produtos || []).find(x => x.chave === prv.chave);
+    prv.ocupadoFormato = true; prv.erroFormato = null; prv.formato = null;
+    if (naTela()) A.router.render();
+    try { prv.formato = Object.assign(await A.repositorio.nuvemMarketingDescobrirFormato(g ? g.ids : [], 3), { produto: g ? g.nome : null }); }
+    catch (e) { prv.erroFormato = (e && e.message) || 'Erro inesperado na descoberta do formato.'; }
+    finally { prv.ocupadoFormato = false; }
+    if (naTela()) A.router.render();
+  }
+  const PERFIL_CRM = { email_concedido_no_crm: 'e-mail concedido no CRM', email_revogado_ou_recusado_no_crm: 'e-mail revogado/recusado no CRM', comprador_sem_registro_de_email: 'comprador sem registro de e-mail' };
+  function blocoFormato() {
+    const f = prv.formato;
+    const tabela = (cs, id) => cs.length ? `<div class="table-wrap"><table id="${id}"><thead><tr><th>Campo</th><th>Tipo</th><th>Valores de situação</th></tr></thead><tbody>
+      ${cs.map(c => `<tr><td><code>${ui.esc(c.caminho)}</code></td><td>${ui.esc(c.tipos.join(', '))}</td><td>${c.valores ? ui.esc(c.valores.join(', ')) : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted small">Sem corpo de resposta.</p>';
+    return `${prv.erroFormato ? `<p class="aviso-inline" id="formatoErro" role="alert">${ui.esc(prv.erroFormato)}</p>` : ''}
+      ${f ? `<div id="formatoApi"><h3>Formato da API do Nuvem Marketing <span class="muted small">(somente leitura · ${ui.num(f.amostras)} amostra(s) · ${ui.num(f.leituras)} de ${ui.num(f.limiteLeituras)} leituras)</span></h3>
+        ${f.interrompido ? `<p class="small aviso-inline">A API pediu para parar (${ui.esc(f.interrompido)}): resultado parcial.</p>` : ''}
+        ${!f.amostras ? '<p class="muted small">Nenhum cliente real com registro de e-mail ou compra do produto para usar como amostra.</p>' : ''}
+        ${f.contatos.map((c, i) => { const at = f.atividade[i]; return `<details class="formato-amostra" ${i === 0 ? 'open' : ''}><summary>Amostra ${c.amostra} — ${ui.esc(PERFIL_CRM[c.perfilCrm] || c.perfilCrm)} · contato: HTTP ${ui.esc(String(c.status))}${c.falha ? ` (${ui.esc(c.falha)})` : ''}${at ? ` · descadastros: HTTP ${ui.esc(String(at.status))}` : ''}</summary>
+          <h4 class="small">GET /contacts/{e-mail}</h4>${tabela(c.campos, 'formatoContato' + c.amostra)}
+          ${at ? `<h4 class="small">GET /activity (descadastros)</h4>${tabela(at.campos, 'formatoAtividade' + at.amostra)}` : ''}</details>`; }).join('')}
+        <div class="btn-row"><button class="btn btn-ghost btn-sm" type="button" id="copiarFormato">Copiar resultado (sem dados pessoais)</button></div>
+        <p class="small muted">Só nomes de campos, tipos e valores de situação (palavras curtas como "active"). Nenhum e-mail, nome, telefone, ID ou data. Nada foi criado ou alterado no Nuvem Marketing e nenhum e-mail foi enviado.</p></div>` : ''}`;
+  }
   const ROTULO_CONTADOR = k => k.replace(/\./g, ' · ').replace(/_/g, ' ');
   function secaoPreviaRecompra(admin) {
     if (!admin) return '';
@@ -227,7 +254,8 @@
         <label>Produto<select id="previaProduto" ${prv.ocupado ? 'disabled' : ''}>${prv.produtos.map(g => `<option value="${ui.esc(g.chave)}" ${g.chave === prv.chave ? 'selected' : ''}>${ui.esc(g.nome)}${g.ids.length > 1 ? ` (${g.ids.length} variantes)` : ''}</option>`).join('')}</select></label>
       </div></div>
       <div class="btn-row"><button class="btn btn-primary btn-sm" type="button" id="calcularPrevia" ${prv.ocupado || !prv.produtos.length ? 'disabled' : ''}>${prv.ocupado ? 'Calculando…' : 'Calcular prévia'}</button>
-        <button class="btn btn-ghost btn-sm" type="button" id="analisarListas" ${prv.ocupadoListas ? 'disabled' : ''}>${prv.ocupadoListas ? 'Lendo listas…' : 'Analisar listas do Nuvem Marketing'}</button></div>`}
+        <button class="btn btn-ghost btn-sm" type="button" id="analisarListas" ${prv.ocupadoListas ? 'disabled' : ''}>${prv.ocupadoListas ? 'Lendo listas…' : 'Analisar listas do Nuvem Marketing'}</button>
+        <button class="btn btn-ghost btn-sm" type="button" id="descobrirFormato" ${prv.ocupadoFormato ? 'disabled' : ''}>${prv.ocupadoFormato ? 'Lendo amostras…' : 'Descobrir formato da API (somente leitura)'}</button></div>`}
       ${prv.erro ? `<p class="aviso-inline" id="previaErro" role="alert">${ui.esc(prv.erro)}</p>` : ''}
       ${r ? `<div id="previaResultado">
         <p class="kpi-destaque" id="previaElegiveis"><strong>${n(r.janela.elegiveis_emails_unicos)}</strong> e-mail(s) elegível(is) para ${ui.esc(r.produto)} — clientes na janela de reposição com autorização de e-mail comprovada${Number(r.janela.elegiveis) !== Number(r.janela.elegiveis_emails_unicos) ? ` (${n(r.janela.elegiveis)} cadastros; repetidos contam uma vez)` : ''}.</p>
@@ -259,6 +287,7 @@
             <td>${Object.keys(l.contadores).length ? Object.entries(l.contadores).map(([k, v]) => `${ui.esc(ROTULO_CONTADOR(k))}: <strong>${n(v)}</strong>`).join(' · ') : '<span class="muted">a API não informou contadores</span>'}</td></tr>`).join('')}
         </tbody></table></div>` : '<p class="muted small">Nenhuma lista devolvida pela API.</p>'}
         <p class="small muted">Nenhuma lista foi criada ou alterada; nenhum contato foi lido nem enviado.</p></div>` : ''}
+      ${blocoFormato()}
     </section>`;
   }
   function blocoNuvemMarketing(admin) {
@@ -427,6 +456,14 @@
       if (cp) cp.addEventListener('click', () => calcularPrevia((root.querySelector('#previaProduto') || {}).value || prv.chave));
       const al = root.querySelector('#analisarListas');
       if (al) al.addEventListener('click', analisarListas);
+      const df = root.querySelector('#descobrirFormato');
+      if (df) df.addEventListener('click', descobrirFormato);
+      const cf = root.querySelector('#copiarFormato');
+      if (cf) cf.addEventListener('click', async () => {
+        const f = prv.formato; if (!f) return;
+        const texto = JSON.stringify({ versao: A.config.version, amostras: f.amostras, leituras: f.leituras, interrompido: f.interrompido, contatos: f.contatos, atividade: f.atividade }, null, 2);
+        const ok = await ui.copy(texto); ui.toast(ok ? 'Resultado copiado (sem dados pessoais).' : 'Não foi possível copiar.', ok ? 'ok' : 'warn');
+      });
       const pv = root.querySelector('#previaNuvemshop');
       if (pv) pv.addEventListener('click', () => sincronizar('previa'));
       const sn = root.querySelector('#sincronizarNuvemshop');

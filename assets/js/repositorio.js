@@ -1440,7 +1440,10 @@
     INVALID_JWT: 'A função recusou o token da sessão (vencido ou não assinado pelas chaves atuais do projeto). Saia e entre novamente.',
     JWKS_NOT_CONFIGURED: 'A função não tem as chaves públicas do projeto para conferir a sessão (JWKS). Fale com o suporte técnico.',
     JWKS_FETCH_FAILED: 'A função não conseguiu ler as chaves públicas do projeto agora. Tente de novo.',
-    acao_invalida: 'Esta versão da função "nuvem-marketing" não tem o teste de conexão. Publique a versão 0.13.2 da função.',
+    acao_invalida: 'A função "nuvem-marketing" publicada não tem esta ação. Publique a versão mais recente da função (0.13.4a).',
+    produtos_invalidos: 'Produtos inválidos para a descoberta.',
+    amostras_invalidas: 'Número de amostras inválido (1 a 3).',
+    banco_amostras: 'A função não conseguiu ler as amostras no banco. Tente de novo.',
     pedido_invalido: 'Pedido inválido para a função.',
     conta_nao_configurada: 'Falta o nome da conta: crie o Secret NUVEM_MARKETING_CONTA no Supabase (Edge Functions → Secrets).',
     api_chave_recusada: 'O Nuvem Marketing recusou a chave (401). Confira a chave API nos Secrets do Supabase.',
@@ -1516,6 +1519,24 @@
       })),
       total: inteiro(d.total), envioHabilitado: d.emailSendingEnabled === true, em: new Date()
     };
+  }
+
+  /** 0.13.4a — Descoberta do formato da API (só leitura): até 3 contatos de amostra; devolve só nomes/tipos de campos.
+   *  Nenhum e-mail, nome ou dado pessoal volta ao navegador (a função filtra; aqui se filtra de novo). */
+  async function nuvemMarketingDescobrirFormato(produtoIds, amostras) {
+    const ids = Array.isArray(produtoIds) ? produtoIds.filter(x => UUID_RE.test(String(x))) : [];
+    const n = Number.isInteger(amostras) && amostras >= 1 && amostras <= 3 ? amostras : 3;
+    const d = await chamarNuvemMarketing({ acao: 'descobrir_formato', produtos: ids, amostras: n }, 60000);
+    if (d.acao !== 'descobrir_formato' || !Array.isArray(d.contatos) || !Array.isArray(d.atividade))
+      throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.4a dela foi publicada.');
+    const limpaCampos = cs => (Array.isArray(cs) ? cs : []).slice(0, 150).map(c => ({
+      caminho: String(c.caminho || '').slice(0, 200),
+      tipos: (Array.isArray(c.tipos) ? c.tipos : []).map(String).slice(0, 8),
+      ...(Array.isArray(c.valores) ? { valores: c.valores.map(String).filter(v => /^[A-Za-z][A-Za-z_\-.]{0,29}$/.test(v)).slice(0, 10) } : {})
+    })).filter(c => c.caminho && !c.caminho.includes('@'));
+    const item = x => ({ amostra: x.amostra, perfilCrm: x.perfilCrm, status: x.status, falha: x.falha || null, campos: limpaCampos(x.campos) });
+    return { amostras: d.amostras, leituras: d.leituras, limiteLeituras: d.limiteLeituras, interrompido: d.interrompido || null,
+             contatos: d.contatos.map(item), atividade: d.atividade.map(item), envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
   }
 
   /** Prévia da recompra por e-mail (só contagens; nada gravado). Só administrador com 2 etapas (o banco confere). */
@@ -1605,6 +1626,7 @@
     nuvemMarketingVerificar,
     nuvemMarketingTestarConexao,
     nuvemMarketingListas,
+    nuvemMarketingDescobrirFormato,
     recompraEmailPrevia,
     nuvemshopPainel,
     urlImagemLoja,
