@@ -4,6 +4,8 @@
 
   // Nuvemshop: teste de conexão + importação (prévia / execução). Estado só em memória; guarda apenas resumos.
   const nuv = { ocupado: null, resultado: null, erro: null, sync: null, erroSync: null, painel: null, erroPainel: null, carregandoPainel: false, ultimaPrevia: null };
+  // Nuvem Marketing: só a verificação da chave (nenhum e-mail é enviado). Estado só em memória.
+  const nm = { ocupado: false, resultado: null, erro: null };
   const ROTULO_PAGAMENTO = { paid: 'Pago', pending: 'Pendente', authorized: 'Autorizado', abandoned: 'Abandonado',
                              refunded: 'Reembolsado', voided: 'Cancelado', partially_paid: 'Pago parcialmente',
                              partially_refunded: 'Reembolsado parcialmente', outro: 'Outro' };
@@ -152,6 +154,25 @@
     if (naTela()) A.router.render();
   }
 
+  async function verificarNuvemMarketing() {
+    if (nm.ocupado || !A.session.isAdmin()) return;
+    nm.ocupado = true; nm.erro = null; nm.resultado = null;
+    if (naTela()) A.router.render();
+    try { nm.resultado = await A.repositorio.nuvemMarketingVerificar(); }
+    catch (e) { nm.erro = (e && e.message) || 'Erro inesperado ao verificar o Nuvem Marketing.'; }
+    finally { nm.ocupado = false; }
+    if (naTela()) A.router.render();
+  }
+  function blocoNuvemMarketing(admin) {
+    if (!admin) return '';
+    const r = nm.resultado;
+    return `<div class="btn-row"><button class="btn btn-ghost btn-sm" type="button" id="verificarNuvemMarketing" ${nm.ocupado ? 'disabled' : ''}>${nm.ocupado ? 'Verificando…' : 'Verificar Nuvem Marketing'}</button></div>
+      <p class="small" id="resultadoNuvemMarketing" role="status" aria-live="polite">${
+        nm.erro ? `<span class="aviso-inline">${ui.esc(nm.erro)}</span>`
+        : r ? `${r.configurada ? ui.badge('Chave encontrada', 'sage') + ' no Supabase.' : 'Chave não encontrada.'} Envio de e-mail: <strong>${r.envioHabilitado ? 'ligado' : 'desligado'}</strong>. <span class="muted">Verificado às ${r.em.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</span>`
+        : '<span class="muted">Confere só se a chave do Nuvem Marketing está nos segredos do Supabase. Nada é enviado.</span>'}</p>`;
+  }
+
   async function sincronizar(modo) {
     if (nuv.ocupado || !A.session.isAdmin()) return;
     nuv.ocupado = modo; nuv.erroSync = null; nuv.sync = null;
@@ -240,7 +261,8 @@
         <article class="card integ"><div class="integ-head"><h3>Nuvemshop</h3>${ui.badge(nuv.painel && nuv.painel.estado && nuv.painel.estado.agendamento_ativo ? 'Automática ligada' : 'Automação desligada / verificando', nuv.painel && nuv.painel.estado && nuv.painel.estado.agendamento_ativo ? 'sage' : 'sand')}</div>
           <p class="small">Produtos, clientes, pedidos e preferências de e-mail da Newsletter via API oficial, somente leitura. Verifique o status e o histórico da sincronização abaixo.</p></article>
         <article class="card integ"><div class="integ-head"><h3>WhatsApp / e-mail</h3>${ui.badge('Fora da V1', 'muted')}</div>
-          <p class="small">Sem disparo automático na primeira versão. Futuro: somente soluções oficiais, com consentimento e descadastro.</p></article>
+          <p class="small">Sem disparo automático na primeira versão. Futuro: somente soluções oficiais, com consentimento e descadastro.</p>
+          ${blocoNuvemMarketing(admin)}</article>
       </section>
 
       ${secaoNuvemshop(admin)}
@@ -289,6 +311,8 @@
     bind(root) {
       const tn = root.querySelector('#testarNuvemshop');
       if (tn) tn.addEventListener('click', testar);
+      const vm = root.querySelector('#verificarNuvemMarketing');
+      if (vm) vm.addEventListener('click', verificarNuvemMarketing);
       const pv = root.querySelector('#previaNuvemshop');
       if (pv) pv.addEventListener('click', () => sincronizar('previa'));
       const sn = root.querySelector('#sincronizarNuvemshop');

@@ -1420,6 +1420,63 @@
     return d;
   }
 
+  // ---------------------------------------------------------------
+  // Nuvem Marketing — VERIFICAÇÃO da integração (Edge Function nuvem-marketing)
+  //   Só confere se a chave está nos Secrets do Supabase. Não envia e-mail, não lê nem envia clientes.
+  //   A sessão já autenticada (senha + código, aal2) vai no cabeçalho Authorization pelo próprio
+  //   supabase-js; nenhum token ou chave é lido, montado ou guardado aqui. A função confere de novo
+  //   (token ECC válido, aal2 e administrador ativo no banco).
+  // ---------------------------------------------------------------
+  const FUNCAO_MARKETING = 'nuvem-marketing';
+  const MSG_MARKETING = {
+    mfa_obrigatorio: 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.',
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas pode verificar o Nuvem Marketing.',
+    sessao_invalida: 'Sessão não aceita pela função. Saia e entre novamente com o código do autenticador.',
+    configuracao_incompleta: 'A chave do Nuvem Marketing não está configurada nos segredos da função (Supabase → Edge Functions → Secrets).',
+    banco_perfil: 'A função não conseguiu conferir o seu perfil no banco. Tente de novo.',
+    metodo_invalido: 'Pedido inválido para a função.',
+    MISSING_CREDENTIALS: 'A função não recebeu a sessão. Saia e entre novamente.',
+    UNUSABLE_CREDENTIAL: 'A função não recebeu a sessão do usuário (só a chave pública). Saia e entre novamente.',
+    INVALID_JWT: 'A função recusou o token da sessão (vencido ou não assinado pelas chaves atuais do projeto). Saia e entre novamente.',
+    JWKS_NOT_CONFIGURED: 'A função não tem as chaves públicas do projeto para conferir a sessão (JWKS). Fale com o suporte técnico.',
+    JWKS_FETCH_FAILED: 'A função não conseguiu ler as chaves públicas do projeto agora. Tente de novo.'
+  };
+
+  /** Verifica se a integração Nuvem Marketing está configurada. Só administrador com 2 etapas. Nada é enviado. */
+  async function nuvemMarketingVerificar() {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem verificar o Nuvem Marketing.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), 30000);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_MARKETING, { body: {}, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') {
+        const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
+        throw new ErroDados('rede', abort ? 'A função não respondeu em 30 segundos. Tente de novo.' : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+      }
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
+      let codigo = '';
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); } catch (e) { codigo = ''; }
+      if (!codigo && err.context && err.context.headers && typeof err.context.headers.get === 'function') codigo = String(err.context.headers.get('x-supabase-server-error') || '');
+      if (status === 404 && !MSG_MARKETING[codigo]) throw new ErroDados('integracao', 'Função "nuvem-marketing" não encontrada. Confira se ela está publicada no projeto.', '404');
+      const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : 'integracao';
+      throw new ErroDados(tipo, MSG_MARKETING[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}.`, codigo || (status ? String(status) : ''));
+    }
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.ok !== true || d.integracao !== 'nuvem-marketing')
+      throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing".');
+    return { configurada: d.chaveConfigurada === true, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
   /** Painel: estado da loja e últimas execuções (o banco só mostra a administradores com 2 etapas). */
   async function nuvemshopPainel() {
     exigirCliente();
@@ -1493,6 +1550,7 @@
     salvarRegrasReais,
     testarNuvemshop,
     nuvemshopSincronizar,
+    nuvemMarketingVerificar,
     nuvemshopPainel,
     urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
