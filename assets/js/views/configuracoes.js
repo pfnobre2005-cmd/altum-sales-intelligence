@@ -6,6 +6,8 @@
   const nuv = { ocupado: null, resultado: null, erro: null, sync: null, erroSync: null, painel: null, erroPainel: null, carregandoPainel: false, ultimaPrevia: null };
   // Nuvem Marketing: só a verificação da chave (nenhum e-mail é enviado). Estado só em memória.
   const nm = { ocupado: false, resultado: null, erro: null };
+  // Teste da conexão real (uma leitura feita pelo servidor). Separado da verificação da chave.
+  const nmc = { ocupado: false, resultado: null, erro: null };
   const ROTULO_PAGAMENTO = { paid: 'Pago', pending: 'Pendente', authorized: 'Autorizado', abandoned: 'Abandonado',
                              refunded: 'Reembolsado', voided: 'Cancelado', partially_paid: 'Pago parcialmente',
                              partially_refunded: 'Reembolsado parcialmente', outro: 'Outro' };
@@ -163,6 +165,15 @@
     finally { nm.ocupado = false; }
     if (naTela()) A.router.render();
   }
+  async function testarConexaoNuvemMarketing() {
+    if (nmc.ocupado || !A.session.isAdmin()) return;
+    nmc.ocupado = true; nmc.erro = null; nmc.resultado = null;
+    if (naTela()) A.router.render();
+    try { nmc.resultado = await A.repositorio.nuvemMarketingTestarConexao(); }
+    catch (e) { nmc.erro = (e && e.message) || 'Erro inesperado ao testar a conexão com o Nuvem Marketing.'; }
+    finally { nmc.ocupado = false; }
+    if (naTela()) A.router.render();
+  }
   function blocoNuvemMarketing(admin) {
     if (!admin) return '';
     const r = nm.resultado;
@@ -170,7 +181,12 @@
       <p class="small" id="resultadoNuvemMarketing" role="status" aria-live="polite">${
         nm.erro ? `<span class="aviso-inline">${ui.esc(nm.erro)}</span>`
         : r ? `${r.configurada ? ui.badge('Chave encontrada', 'sage') + ' no Supabase.' : 'Chave não encontrada.'} Envio de e-mail: <strong>${r.envioHabilitado ? 'ligado' : 'desligado'}</strong>. <span class="muted">Verificado às ${r.em.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</span>`
-        : '<span class="muted">Confere só se a chave do Nuvem Marketing está nos segredos do Supabase. Nada é enviado.</span>'}</p>`;
+        : '<span class="muted">Confere só se a chave do Nuvem Marketing está nos segredos do Supabase. Nada é enviado.</span>'}</p>
+      <div class="btn-row"><button class="btn btn-ghost btn-sm" type="button" id="testarConexaoNuvemMarketing" ${nmc.ocupado ? 'disabled' : ''}>${nmc.ocupado ? 'Testando…' : 'Testar conexão com Nuvem Marketing'}</button></div>
+      <p class="small" id="resultadoConexaoNuvemMarketing" role="status" aria-live="polite">${
+        nmc.erro ? `<span class="aviso-inline">${ui.esc(nmc.erro)}</span>`
+        : nmc.resultado ? `${ui.badge('Autenticação aceita', 'sage')} pela API do Nuvem Marketing${nmc.resultado.listas === null ? ' (a API não informou o total de listas)' : ` · ${ui.num(nmc.resultado.listas)} ${nmc.resultado.listas === 1 ? 'lista' : 'listas'}`}. Envio de e-mail: <strong>${nmc.resultado.envioHabilitado ? 'ligado' : 'desligado'}</strong>. <span class="muted">Testado às ${nmc.resultado.em.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.</span>`
+        : '<span class="muted">Faz uma única leitura na API (pelo servidor) para confirmar a chave. Não sincroniza contatos nem envia e-mail.</span>'}</p>`;
   }
 
   async function sincronizar(modo) {
@@ -313,6 +329,8 @@
       if (tn) tn.addEventListener('click', testar);
       const vm = root.querySelector('#verificarNuvemMarketing');
       if (vm) vm.addEventListener('click', verificarNuvemMarketing);
+      const tc = root.querySelector('#testarConexaoNuvemMarketing');
+      if (tc) tc.addEventListener('click', testarConexaoNuvemMarketing);
       const pv = root.querySelector('#previaNuvemshop');
       if (pv) pv.addEventListener('click', () => sincronizar('previa'));
       const sn = root.querySelector('#sincronizarNuvemshop');

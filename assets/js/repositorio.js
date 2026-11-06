@@ -1439,28 +1439,40 @@
     UNUSABLE_CREDENTIAL: 'A função não recebeu a sessão do usuário (só a chave pública). Saia e entre novamente.',
     INVALID_JWT: 'A função recusou o token da sessão (vencido ou não assinado pelas chaves atuais do projeto). Saia e entre novamente.',
     JWKS_NOT_CONFIGURED: 'A função não tem as chaves públicas do projeto para conferir a sessão (JWKS). Fale com o suporte técnico.',
-    JWKS_FETCH_FAILED: 'A função não conseguiu ler as chaves públicas do projeto agora. Tente de novo.'
+    JWKS_FETCH_FAILED: 'A função não conseguiu ler as chaves públicas do projeto agora. Tente de novo.',
+    acao_invalida: 'Esta versão da função "nuvem-marketing" não tem o teste de conexão. Publique a versão 0.13.2 da função.',
+    pedido_invalido: 'Pedido inválido para a função.',
+    conta_nao_configurada: 'Falta o nome da conta: crie o Secret NUVEM_MARKETING_CONTA no Supabase (Edge Functions → Secrets).',
+    api_chave_recusada: 'O Nuvem Marketing recusou a chave (401). Confira a chave API nos Secrets do Supabase.',
+    api_sem_permissao: 'A chave é válida, mas o usuário dela no Nuvem Marketing não tem permissão para ler listas (403).',
+    api_conta_nao_encontrada: 'O Nuvem Marketing não encontrou a conta (404). Confira o Secret NUVEM_MARKETING_CONTA.',
+    api_limite_ou_indisponivel: 'O Nuvem Marketing está limitando o acesso ou indisponível agora. Tente de novo em alguns minutos.',
+    api_sem_resposta: 'O Nuvem Marketing não respondeu em 10 segundos. Tente de novo.',
+    api_indisponivel: 'Não foi possível falar com o Nuvem Marketing agora. Tente de novo.',
+    api_redirecionamento: 'O Nuvem Marketing respondeu com um redirecionamento; por segurança a chave não foi reenviada. Fale com o suporte técnico.',
+    api_resposta_invalida: 'O Nuvem Marketing devolveu uma resposta inesperada.',
+    api_erro: 'O Nuvem Marketing respondeu com erro. Tente de novo.'
   };
 
-  /** Verifica se a integração Nuvem Marketing está configurada. Só administrador com 2 etapas. Nada é enviado. */
-  async function nuvemMarketingVerificar() {
+  // Chamada comum às duas ações (a sessão vai sozinha no Authorization; nada é montado aqui).
+  async function chamarNuvemMarketing(corpo, prazoMs) {
     exigirCliente();
-    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem verificar o Nuvem Marketing.');
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem usar a integração Nuvem Marketing.');
     let nivel;
     try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
     if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
       throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
     const ctrl = new AbortController();
-    const prazo = setTimeout(() => ctrl.abort(), 30000);
+    const prazo = setTimeout(() => ctrl.abort(), prazoMs);
     let r;
-    try { r = await sb.functions.invoke(FUNCAO_MARKETING, { body: {}, signal: ctrl.signal }); }
+    try { r = await sb.functions.invoke(FUNCAO_MARKETING, { body: corpo, signal: ctrl.signal }); }
     catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
     finally { clearTimeout(prazo); }
     if (r.error) {
       const err = r.error;
       if (err.name === 'FunctionsFetchError') {
         const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
-        throw new ErroDados('rede', abort ? 'A função não respondeu em 30 segundos. Tente de novo.' : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+        throw new ErroDados('rede', abort ? `A função não respondeu em ${Math.round(prazoMs / 1000)} segundos. Tente de novo.` : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
       }
       if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
       const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
@@ -1474,7 +1486,21 @@
     const d = r.data;
     if (!d || typeof d !== 'object' || d.ok !== true || d.integracao !== 'nuvem-marketing')
       throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing".');
+    return d;
+  }
+
+  /** Verifica se a integração Nuvem Marketing está configurada. Só administrador com 2 etapas. Nada é enviado. */
+  async function nuvemMarketingVerificar() {
+    const d = await chamarNuvemMarketing({}, 30000);
     return { configurada: d.chaveConfigurada === true, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
+  /** Testa a autenticação REAL na API (uma leitura das listas, feita pelo servidor). Não sincroniza contatos nem envia e-mail. */
+  async function nuvemMarketingTestarConexao() {
+    const d = await chamarNuvemMarketing({ acao: 'testar_conexao' }, 30000);
+    if (d.acao !== 'testar_conexao' || d.autenticada !== true) throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.2 dela foi publicada.');
+    const n = d.listas;
+    return { autenticada: true, listas: Number.isSafeInteger(n) && n >= 0 ? n : null, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
   }
 
   /** Painel: estado da loja e últimas execuções (o banco só mostra a administradores com 2 etapas). */
@@ -1551,6 +1577,7 @@
     testarNuvemshop,
     nuvemshopSincronizar,
     nuvemMarketingVerificar,
+    nuvemMarketingTestarConexao,
     nuvemshopPainel,
     urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
