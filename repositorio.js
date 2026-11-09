@@ -1028,7 +1028,7 @@
         .eq('campanha_id', id).order('nome', { nullsFirst: false }).order('id'), 'os destinatários'),
       lerTudo(o => sb.from('v_atribuicao_pedidos').select('pedido_id, cliente_id, data_pedido, total, cupom_codigo, enviado_em', o)
         .eq('campanha_id', id).order('data_pedido', { ascending: false }).order('pedido_id'), 'os pedidos atribuídos'),
-      lerTudo(o => sb.from('campanha_produtos').select('produto_id, produtos(nome, sku)', o).eq('campanha_id', id).order('produto_id'), 'os produtos da campanha'),
+      lerTudo(o => sb.from('campanha_produtos').select('produto_id, produtos(nome, sku, ciclo_recompra_dias, nuvemshop_produto_id)', o).eq('campanha_id', id).order('produto_id'), 'os produtos da campanha'),
       perfisVisiveis()
     ]);
     if (!c) throw new ErroDados('nao_encontrado', 'Campanha não encontrada.');
@@ -1059,7 +1059,9 @@
       },
       resultado: res ? mapearResultado(res) : null,
       cupom: cupom ? { id: cupom.id, codigo: cupom.codigo, tipo: cupom.tipo, valor: cupom.valor === null ? null : num(cupom.valor), ativo: cupom.ativo, fonte: cupom.fonte } : null,
-      produtos: prods.map(p => ({ id: p.produto_id, nome: p.produtos ? p.produtos.nome : '—', sku: p.produtos ? p.produtos.sku : null })),
+      produtos: prods.map(p => ({ id: p.produto_id, nome: p.produtos ? p.produtos.nome : '—', sku: p.produtos ? p.produtos.sku : null,
+                                  ciclo: p.produtos ? p.produtos.ciclo_recompra_dias : null,
+                                  produtoLoja: p.produtos && p.produtos.nuvemshop_produto_id !== null ? String(p.produtos.nuvemshop_produto_id) : null })),
       destinatarios: dest.map(d => ({ id: d.id, clienteId: d.cliente_id, nome: d.nome, situacao: d.situacao, motivo: d.motivo_bloqueio,
                                      incluidoEm: d.incluido_em, verificadoEm: d.verificado_em, enviadoEm: d.enviado_em, enviadoPor: d.enviado_em ? quem(d.enviado_por) : null,
                                      podeEnviar: d.pode_enviar_agora === true, ultimaCompra: ultima.get(d.cliente_id) || null })),
@@ -1127,28 +1129,28 @@
     return r;
   }
 
-  /** Candidatos REAIS do público, só quem tem permissão atual de marketing no canal (o banco confere de novo ao incluir). */
-  async function campanhaCandidatos(f) {
+  /** Candidatos do público GRAVADO na campanha (público + produtos em foco), com permissão atual no canal.
+   *  Regra única no banco (018: campanha_candidatos = a mesma da inclusão). Sem e-mail/telefone. */
+  async function campanhaCandidatos(campanhaId, q) {
     exigirCliente();
-    const canal = CANAIS_CAMPANHA.includes(f.canal) ? f.canal : null;
-    if (!canal) throw new ErroDados('validacao', 'Canal inválido.');
-    const pode = canal === 'email' ? 'pode_email' : 'pode_whatsapp';
-    const t = termoBusca(f.q);
-    if (f.publico === 'janela' || f.publico === 'atrasado') {
-      let q = sb.from('v_recompra_painel').select('cliente_id, cliente_nome, produto, reposicao_estimada').neq('cliente_fonte', 'ficticio')
-        .eq('situacao', f.publico).eq(pode, true);
-      if (t) q = q.ilike('cliente_nome', `*${t}*`);
-      const r = await lerUm(() => q.order('reposicao_estimada').order('cliente_id').limit(1000), 'os candidatos');
-      const vistos = new Map();
-      (r || []).forEach(x => { if (!vistos.has(x.cliente_id)) vistos.set(x.cliente_id, { id: x.cliente_id, nome: x.cliente_nome, detalhe: `${x.produto} · reposição ${x.reposicao_estimada}` }); });
-      return [...vistos.values()].slice(0, 500);
-    }
-    let q = sb.from('v_clientes_resumo').select('id, nome, cidade, uf, segmento, pedidos_pagos, ultima_compra, status_comercial')
-      .neq('fonte', 'ficticio').eq('anonimizado', false).neq('status_comercial', 'nao_contatar').eq(pode, true);
-    if (f.publico !== 'selecao_manual') q = q.eq('segmento', f.publico);
-    if (t) q = q.ilike('nome', `*${t}*`);
-    const r = await lerUm(() => q.order('nome').order('id').limit(500), 'os candidatos');
-    return (r || []).map(x => ({ id: x.id, nome: x.nome, detalhe: [x.cidade && `${x.cidade}/${x.uf || ''}`, `${num(x.pedidos_pagos)} pedidos`, x.ultima_compra && `última compra ${x.ultima_compra}`].filter(Boolean).join(' · ') }));
+    if (!UUID_RE.test(String(campanhaId || ''))) throw new ErroDados('validacao', 'Campanha inválida.');
+    const r = await rpc('campanha_candidatos', { p_campanha: campanhaId, p_busca: termoBusca(q) || null }, 'os candidatos');
+    return (r || []).map(x => ({ id: x.cliente_id, nome: x.nome, detalhe: x.detalhe || '' }));
+  }
+
+  /** Produtos reais ativos que podem entrar como "produto em foco" (variantes da loja agrupadas pela tela). */
+  async function produtosParaCampanha() {
+    exigirCliente();
+    const r = await lerTudo(o => sb.from('produtos').select('id, nome, sku, ciclo_recompra_dias, nuvemshop_produto_id, fonte', o)
+      .neq('fonte', 'ficticio').eq('ativo', true).order('nome').order('id'), 'os produtos');
+    return r.map(p => ({ id: p.id, nome: p.nome, sku: p.sku, ciclo: p.ciclo_recompra_dias, produtoLoja: p.nuvemshop_produto_id === null ? null : String(p.nuvemshop_produto_id) }));
+  }
+
+  /** Troca atômica dos produtos em foco (o banco confere origem, produto ativo, rascunho, destinatários e anula a aprovação). */
+  function campanhaDefinirProdutos(campanhaId, produtoIds) {
+    if (!UUID_RE.test(String(campanhaId || '')) || !Array.isArray(produtoIds) || produtoIds.some(x => !UUID_RE.test(String(x))))
+      return Promise.reject(new ErroDados('validacao', 'Produtos inválidos.'));
+    return rpc('campanha_definir_produtos', { p_campanha: campanhaId, p_produtos: produtoIds }, 'os produtos da campanha');
   }
 
   /** Cupons de UMA origem + códigos usados em pedidos pagos da loja que ainda não foram cadastrados. */
@@ -1418,6 +1420,252 @@
     return d;
   }
 
+  // ---------------------------------------------------------------
+  // Nuvem Marketing — VERIFICAÇÃO da integração (Edge Function nuvem-marketing)
+  //   Só confere se a chave está nos Secrets do Supabase. Não envia e-mail, não lê nem envia clientes.
+  //   A sessão já autenticada (senha + código, aal2) vai no cabeçalho Authorization pelo próprio
+  //   supabase-js; nenhum token ou chave é lido, montado ou guardado aqui. A função confere de novo
+  //   (token ECC válido, aal2 e administrador ativo no banco).
+  // ---------------------------------------------------------------
+  const FUNCAO_MARKETING = 'nuvem-marketing';
+  const MSG_MARKETING = {
+    mfa_obrigatorio: 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.',
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas pode verificar o Nuvem Marketing.',
+    sessao_invalida: 'Sessão não aceita pela função. Saia e entre novamente com o código do autenticador.',
+    configuracao_incompleta: 'A chave do Nuvem Marketing não está configurada nos segredos da função (Supabase → Edge Functions → Secrets).',
+    banco_perfil: 'A função não conseguiu conferir o seu perfil no banco. Tente de novo.',
+    metodo_invalido: 'Pedido inválido para a função.',
+    MISSING_CREDENTIALS: 'A função não recebeu a sessão. Saia e entre novamente.',
+    UNUSABLE_CREDENTIAL: 'A função não recebeu a sessão do usuário (só a chave pública). Saia e entre novamente.',
+    INVALID_JWT: 'A função recusou o token da sessão (vencido ou não assinado pelas chaves atuais do projeto). Saia e entre novamente.',
+    JWKS_NOT_CONFIGURED: 'A função não tem as chaves públicas do projeto para conferir a sessão (JWKS). Fale com o suporte técnico.',
+    JWKS_FETCH_FAILED: 'A função não conseguiu ler as chaves públicas do projeto agora. Tente de novo.',
+    acao_invalida: 'A função "nuvem-marketing" publicada não tem esta ação. Publique a versão mais recente da função (0.13.4a).',
+    produtos_invalidos: 'Produtos inválidos para a descoberta.',
+    amostras_invalidas: 'Número de amostras inválido (1 a 3).',
+    banco_amostras: 'A função não conseguiu ler as amostras no banco. Tente de novo.',
+    pedido_invalido: 'Pedido inválido para a função.',
+    conta_nao_configurada: 'Falta o nome da conta: crie o Secret NUVEM_MARKETING_CONTA no Supabase (Edge Functions → Secrets).',
+    api_chave_recusada: 'O Nuvem Marketing recusou a chave (401). Confira a chave API nos Secrets do Supabase.',
+    api_sem_permissao: 'A chave é válida, mas o usuário dela no Nuvem Marketing não tem permissão para ler listas (403).',
+    api_conta_nao_encontrada: 'O Nuvem Marketing não encontrou a conta (404). Confira o Secret NUVEM_MARKETING_CONTA.',
+    api_limite_ou_indisponivel: 'O Nuvem Marketing está limitando o acesso ou indisponível agora. Tente de novo em alguns minutos.',
+    api_sem_resposta: 'O Nuvem Marketing não respondeu em 10 segundos. Tente de novo.',
+    api_indisponivel: 'Não foi possível falar com o Nuvem Marketing agora. Tente de novo.',
+    api_redirecionamento: 'O Nuvem Marketing respondeu com um redirecionamento; por segurança a chave não foi reenviada. Fale com o suporte técnico.',
+    api_resposta_invalida: 'O Nuvem Marketing devolveu uma resposta inesperada.',
+    api_erro: 'O Nuvem Marketing respondeu com erro. Tente de novo.'
+  };
+
+  // Chamada comum às duas ações (a sessão vai sozinha no Authorization; nada é montado aqui).
+  async function chamarNuvemMarketing(corpo, prazoMs) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem usar a integração Nuvem Marketing.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), prazoMs);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_MARKETING, { body: corpo, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') {
+        const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
+        throw new ErroDados('rede', abort ? `A função não respondeu em ${Math.round(prazoMs / 1000)} segundos. Tente de novo.` : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+      }
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
+      let codigo = '';
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); } catch (e) { codigo = ''; }
+      if (!codigo && err.context && err.context.headers && typeof err.context.headers.get === 'function') codigo = String(err.context.headers.get('x-supabase-server-error') || '');
+      if (status === 404 && !MSG_MARKETING[codigo]) throw new ErroDados('integracao', 'Função "nuvem-marketing" não encontrada. Confira se ela está publicada no projeto.', '404');
+      const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : 'integracao';
+      throw new ErroDados(tipo, MSG_MARKETING[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}.`, codigo || (status ? String(status) : ''));
+    }
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.ok !== true || d.integracao !== 'nuvem-marketing')
+      throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing".');
+    return d;
+  }
+
+  /** Verifica se a integração Nuvem Marketing está configurada. Só administrador com 2 etapas. Nada é enviado. */
+  async function nuvemMarketingVerificar() {
+    const d = await chamarNuvemMarketing({}, 30000);
+    return { configurada: d.chaveConfigurada === true, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
+  /** Testa a autenticação REAL na API (uma leitura das listas, feita pelo servidor). Não sincroniza contatos nem envia e-mail. */
+  async function nuvemMarketingTestarConexao() {
+    const d = await chamarNuvemMarketing({ acao: 'testar_conexao' }, 30000);
+    if (d.acao !== 'testar_conexao' || d.autenticada !== true) throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.2 dela foi publicada.');
+    const n = d.listas;
+    return { autenticada: true, listas: Number.isSafeInteger(n) && n >= 0 ? n : null, envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
+  /** Listas do Nuvem Marketing: SÓ metadados (id, nome, contadores informados pela API). Uma leitura; nada é alterado. */
+  async function nuvemMarketingListas() {
+    const d = await chamarNuvemMarketing({ acao: 'analisar_listas' }, 30000);
+    if (d.acao !== 'analisar_listas' || !Array.isArray(d.listas)) throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.3 dela foi publicada.');
+    const inteiro = n => (Number.isSafeInteger(n) && n >= 0 ? n : null);
+    return {
+      listas: d.listas.slice(0, 50).map(l => ({
+        id: l && l.id != null ? String(l.id).slice(0, 40) : null,
+        nome: l && typeof l.nome === 'string' ? l.nome.slice(0, 120) : null,
+        contadores: Object.fromEntries(Object.entries((l && l.contadores) || {}).filter(([k, v]) => /^[A-Za-z][A-Za-z0-9_.]{0,80}$/.test(k) && inteiro(v) !== null).slice(0, 20))
+      })),
+      total: inteiro(d.total), envioHabilitado: d.emailSendingEnabled === true, em: new Date()
+    };
+  }
+
+  /** 0.13.4a — Descoberta do formato da API (só leitura): até 3 contatos de amostra; devolve só nomes/tipos de campos.
+   *  Nenhum e-mail, nome ou dado pessoal volta ao navegador (a função filtra; aqui se filtra de novo). */
+  async function nuvemMarketingDescobrirFormato(produtoIds, amostras) {
+    const ids = Array.isArray(produtoIds) ? produtoIds.filter(x => UUID_RE.test(String(x))) : [];
+    const n = Number.isInteger(amostras) && amostras >= 1 && amostras <= 3 ? amostras : 3;
+    const d = await chamarNuvemMarketing({ acao: 'descobrir_formato', produtos: ids, amostras: n }, 60000);
+    if (d.acao !== 'descobrir_formato' || !Array.isArray(d.contatos) || !Array.isArray(d.atividade))
+      throw new ErroDados('integracao', 'Resposta inesperada da função "nuvem-marketing". Confira se a versão 0.13.4a dela foi publicada.');
+    const limpaCampos = cs => (Array.isArray(cs) ? cs : []).slice(0, 150).map(c => ({
+      caminho: String(c.caminho || '').slice(0, 200),
+      tipos: (Array.isArray(c.tipos) ? c.tipos : []).map(String).slice(0, 8),
+      ...(Array.isArray(c.valores) ? { valores: c.valores.map(String).filter(v => /^[A-Za-z][A-Za-z_\-.]{0,29}$/.test(v)).slice(0, 10) } : {})
+    })).filter(c => c.caminho && !c.caminho.includes('@'));
+    const CONCLUSOES = ['descadastro_encontrado', 'nenhum_evento_retornado', 'inconclusivo_processando', 'inconclusivo_formato', 'inconclusivo_filtro_ignorado', 'erro'];
+    const inteiro = v => (Number.isInteger(v) && v >= 0 && v < 1e9 ? v : null);
+    const limpaResposta = r => (r && typeof r === 'object' ? {
+      tipoConteudo: /^[a-z]+\/[a-z0-9.+-]{1,60}$|^(ausente|outro)$/.test(String(r.tipoConteudo)) ? String(r.tipoConteudo) : 'outro',
+      bytes: inteiro(r.bytes), retryAfterSeg: inteiro(r.retryAfterSeg),
+      location: r.location && typeof r.location === 'object'
+        ? { mesmoHost: r.location.mesmoHost === true, caminho: String(r.location.caminho || '').replace(/[^A-Za-z0-9_\-/{}]/g, '').slice(0, 120) } : null,
+      cabecalhos: (Array.isArray(r.cabecalhos) ? r.cabecalhos : []).map(String).filter(n => /^[a-z0-9-]{1,40}$/.test(n)).slice(0, 30)
+    } : null);
+    const item = x => ({ amostra: x.amostra, perfilCrm: x.perfilCrm, status: x.status, falha: x.falha || null, campos: limpaCampos(x.campos),
+      ...(x.conclusao !== undefined ? { conclusao: CONCLUSOES.includes(x.conclusao) ? x.conclusao : 'erro' } : {}),
+      ...(Array.isArray(x.tentativas) ? { tentativas: x.tentativas.slice(0, 2).map(t => ({ status: inteiro(t.status), falha: /^[a-z_]{1,30}$/.test(String(t.falha || '')) ? t.falha : null,
+                                                                                      resposta: limpaResposta(t.resposta), campos: limpaCampos(t.campos) })) } : {}) });
+    return { amostras: d.amostras, leituras: d.leituras, limiteLeituras: d.limiteLeituras, interrompido: d.interrompido || null,
+             contatos: d.contatos.map(item), atividade: d.atividade.map(item), envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
+  // ---------------------------------------------------------------------
+  // 0.14.0 — Automação de recompra (migração 020 + Edge Function "recompra-automacao")
+  // Tudo começa DESLIGADO. O banco confere administrador ativo com 2 etapas em cada chamada.
+  // A tela nunca recebe e-mails: só contagens, códigos e o nome do cliente no detalhe.
+  // ---------------------------------------------------------------------
+  const FUNCAO_RECOMPRA = 'recompra-automacao';
+  const MSG_RECOMPRA = {
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas.',
+    sessao_invalida: 'Sessão expirada. Saia e entre novamente.',
+    em_andamento: 'Já existe uma execução em andamento para esta automação. Aguarde alguns minutos.',
+    nao_encontrada: 'Automação não encontrada.',
+    invalido: 'Pedido inválido para esta automação.',
+    parametros_invalidos: 'Pedido inválido para esta automação.',
+    acao_invalida: 'A função publicada não reconhece esta ação. Publique o código da versão 0.14.1 em Edge Functions → recompra-automacao.',
+    configuracao_incompleta: 'A função "recompra-automacao" está sem as variáveis automáticas do Supabase (URL e chaves do projeto).',
+    erro_interno: 'Erro interno na função "recompra-automacao". Veja Edge Functions → recompra-automacao → Logs.',
+    metodo_invalido: 'Chamada inválida para a função "recompra-automacao".',
+    banco: 'O banco recusou o pedido. Confira se a migração 020 foi aplicada.',
+  };
+  async function chamarRecompra(corpo, prazoMs) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem usar a automação de recompra.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), prazoMs);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_RECOMPRA, { body: corpo, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') {
+        const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
+        throw new ErroDados('rede', abort ? `A função não respondeu em ${Math.round(prazoMs / 1000)} segundos. Confira o histórico antes de tentar de novo.` : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+      }
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
+      let codigo = '', nossa = false;
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); nossa = !!(c && c.funcao === FUNCAO_RECOMPRA); } catch (e) { codigo = ''; }
+      if (status === 404 && !nossa) throw new ErroDados('integracao', 'Função "recompra-automacao" não encontrada no Supabase. Confira o nome exato em Edge Functions.', '404');
+      if (status === 401 && !nossa) throw new ErroDados('sessao', 'O Supabase recusou a sessão antes de chegar à função. Em Edge Functions → recompra-automacao → Details, desligue "Verify JWT" (a função confere o administrador pelo banco) ou saia e entre de novo.', '401');
+      const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : status === 409 ? 'conflito' : 'integracao';
+      throw new ErroDados(tipo, MSG_RECOMPRA[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}${codigo ? ` [${codigo}]` : ''}.`, codigo || (status ? String(status) : ''));
+    }
+    // 0.14.1: só aceita resposta IDENTIFICADA da nossa função. Sem isso (ex.: código-modelo "Hello" do Supabase
+    // ainda publicado), nada de "Falta" ou "Simulação — null": erro explícito com o que fazer.
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.funcao !== FUNCAO_RECOMPRA || typeof d.versao !== 'string')
+      throw new ErroDados('integracao', 'A função "recompra-automacao" publicada no Supabase não é a do ALTUM (resposta sem identificação). Em Edge Functions → recompra-automacao → Code, substitua TODO o código pelo arquivo index.ts da versão 0.14.1 e clique em Deploy.', 'funcao_desconhecida');
+    return d;
+  }
+  const CODIGO = v => (typeof v === 'string' && /^[a-z0-9_]{1,60}$/.test(v) ? v : null);
+  const contagens = o => { const s = {}; if (o && typeof o === 'object') Object.entries(o).forEach(([k, v]) => { if (CODIGO(k) && Number.isFinite(Number(v))) s[k] = Number(v); }); return s; };
+  /** Painel: chave geral, automações (com bloqueios do modo real) e últimas execuções. */
+  async function recompraPainel() {
+    const d = await rpc('recompra_painel', {}, 'a automação de recompra');
+    if (!d || typeof d !== 'object' || !Array.isArray(d.automacoes)) throw new ErroDados('integracao', 'Resposta inesperada do banco. Confira se a migração 020 foi aplicada.');
+    return {
+      envioRealLiberado: !!(d.controle && d.controle.envio_real_liberado === true),
+      enviosUltimaHora: Number(d.envios_ultima_hora) || 0,
+      automacoes: d.automacoes.map(a => ({ id: a.id, nome: a.nome, produtos: a.produtos || [], produtosNomes: a.produtos_nomes || [], lista: a.nm_lista_id, trigger: a.trigger_key,
+        modo: a.modo, agendamento: a.agendamento_ativo === true, limite: a.limite_por_execucao, intervalo: a.intervalo_reenvio_dias,
+        aprovadaEm: a.aprovada_em, aprovacaoExecucao: a.aprovacao_execucao, atualizadaEm: a.atualizada_em, bloqueiosReal: (a.bloqueios_real || []).map(CODIGO).filter(Boolean) })),
+      execucoes: (d.execucoes || []).map(e => ({ id: e.id, automacao: e.automacao_id, modo: e.modo, origem: e.origem, status: CODIGO(e.status), iniciadaEm: e.iniciada_em,
+        concluidaEm: e.concluida_em, bloqueios: (e.bloqueios || []).map(CODIGO).filter(Boolean), erro: CODIGO(e.erro_codigo), api: contagens(e.api),
+        crm: contagens(e.contadores && e.contadores.crm), nm: contagens(e.contadores && e.contadores.nuvem_marketing), acoes: contagens(e.contadores && e.contadores.acoes) })),
+      lidoEm: new Date() };
+  }
+  function recompraSalvarAutomacao(a) {
+    if (!Array.isArray(a.produtos) || !a.produtos.length || a.produtos.some(x => !UUID_RE.test(String(x)))) return Promise.reject(new ErroDados('validacao', 'Escolha um produto.'));
+    return rpc('recompra_automacao_salvar', { p_id: a.id || null, p_nome: a.nome, p_produtos: a.produtos, p_lista: a.lista || null,
+      p_trigger: a.trigger || null, p_limite: a.limite, p_intervalo: a.intervalo }, 'a automação');
+  }
+  const recompraAprovar = (automacao, execucao) => rpc('recompra_automacao_aprovar', { p_automacao: automacao, p_execucao: execucao }, 'a aprovação');
+  const recompraModo = (automacao, modo, agendamento) => rpc('recompra_automacao_modo', { p_automacao: automacao, p_modo: modo, p_agendamento: !!agendamento }, 'o modo da automação');
+  const recompraChaveGeral = ligar => rpc('recompra_chave_geral', { p_ligar: !!ligar }, 'a chave geral');
+  async function recompraExecucaoDetalhe(execucao) {
+    const d = await rpc('recompra_execucao_detalhe', { p_execucao: execucao }, 'o detalhe da execução');
+    return (Array.isArray(d) ? d : []).map(i => ({ cliente: i.cliente || 'Cliente anonimizado', compraRef: i.compra_ref, etapa: CODIGO(i.etapa_crm), resultado: CODIGO(i.resultado),
+      contato: CODIGO(i.nm_contato), estado: CODIGO(i.nm_estado), atividade: CODIGO(i.nm_atividade), acao: CODIGO(i.acao), detalhe: CODIGO(i.detalhe) }));
+  }
+  /** Executa (simulação ou real) pela Edge Function. Só contagens voltam ao navegador. */
+  async function recompraExecutar(automacao, modo) {
+    if (!UUID_RE.test(String(automacao || '')) || !['simulacao', 'real'].includes(modo)) throw new ErroDados('validacao', 'Pedido inválido.');
+    const d = await chamarRecompra({ acao: 'executar', automacao, modo }, 150000);
+    const STATUS_OK = ['concluida', 'concluida_com_avisos', 'falhou', 'bloqueada'];
+    if (!UUID_RE.test(String(d.execucao || '')) || !STATUS_OK.includes(d.status) || (d.modo !== 'simulacao' && d.modo !== 'real'))
+      throw new ErroDados('integracao', `Resposta incompleta da função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}): nenhuma execução foi informada. Atualize a função para a 0.14.1 e confira o histórico.`, 'resposta_incompleta');
+    return { execucao: d.execucao, versao: d.versao, modo: d.modo, bloqueada: d.bloqueada === true, bloqueios: (d.bloqueios || []).map(CODIGO).filter(Boolean),
+             status: d.status, erro: CODIGO(d.erro), api: contagens(d.api) };
+  }
+  /** Quais Secrets o servidor tem (sem revelar valores). */
+  async function recompraEstadoServidor() {
+    const d = await chamarRecompra({ acao: 'estado' }, 30000);
+    const e = d.estado;
+    const campos = ['chave_api', 'conta', 'url_trigger_valida', 'envio_real_servidor', 'segredo_agendamento'];
+    if (!e || typeof e !== 'object' || campos.some(k => typeof e[k] !== 'boolean'))      // nunca "Falta" por resposta inesperada
+      throw new ErroDados('integracao', `A função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}) não informou os Secrets. Atualize-a para a 0.14.1.`, 'resposta_incompleta');
+    return { versao: d.versao, chaveApi: e.chave_api, conta: e.conta, urlTrigger: e.url_trigger_valida, envioRealServidor: e.envio_real_servidor, segredoAgendamento: e.segredo_agendamento };
+  }
+
+  /** Prévia da recompra por e-mail (só contagens; nada gravado). Só administrador com 2 etapas (o banco confere). */
+  async function recompraEmailPrevia(produtoIds) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem calcular a prévia.');
+    if (!Array.isArray(produtoIds) || !produtoIds.length || produtoIds.some(x => !UUID_RE.test(String(x))))
+      throw new ErroDados('validacao', 'Escolha um produto.');
+    const r = await rpc('recompra_email_previa', { p_produtos: produtoIds }, 'a prévia da recompra');
+    if (!r || typeof r !== 'object' || !r.janela || !r.situacao) throw new ErroDados('integracao', 'Resposta inesperada do banco. Confira se a migração 019 foi aplicada.');
+    return Object.assign({}, r, { em: new Date() });
+  }
+
   /** Painel: estado da loja e últimas execuções (o banco só mostra a administradores com 2 etapas). */
   async function nuvemshopPainel() {
     exigirCliente();
@@ -1481,6 +1729,8 @@
     campanhaMarcarEnvio,
     campanhaRemoverDestinatario,
     campanhaCandidatos,
+    produtosParaCampanha,
+    campanhaDefinirProdutos,
     cupons,
     cupomRegistrar,
     cupomAlterarStatus,
@@ -1489,6 +1739,19 @@
     salvarRegrasReais,
     testarNuvemshop,
     nuvemshopSincronizar,
+    nuvemMarketingVerificar,
+    nuvemMarketingTestarConexao,
+    nuvemMarketingListas,
+    nuvemMarketingDescobrirFormato,
+    recompraEmailPrevia,
+    recompraPainel,
+    recompraSalvarAutomacao,
+    recompraAprovar,
+    recompraModo,
+    recompraChaveGeral,
+    recompraExecucaoDetalhe,
+    recompraExecutar,
+    recompraEstadoServidor,
     nuvemshopPainel,
     urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2
