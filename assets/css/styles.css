@@ -405,3 +405,10 @@ details.historico summary { cursor: pointer; font-weight: 600; color: var(--ink-
 .nuvemshop-previa p, #nuvemshopSyncResultado p { margin: 4px 0; }
 .tabela-sync th[scope=row] { text-align: left; font-weight: 600; }
 #secaoNuvemshop .btn-row { margin-top: 12px; flex-wrap: wrap; }
+/* Integrações: automação de recompra (0.14.0) */
+#secaoAutomacaoRecompra .card-sub { margin: 12px 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+#secaoAutomacaoRecompra .card-sub .integ-head { flex-wrap: wrap; gap: 6px; justify-content: flex-start; }
+#secaoAutomacaoRecompra .card-sub .integ-head h3 { margin-right: auto; }
+#secaoAutomacaoRecompra .btn-row { margin-top: 10px; flex-wrap: wrap; }
+#secaoAutomacaoRecompra .lista-simples { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
+#secaoAutomacaoRecompra #recForm { margin: 12px 0; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 12px; }

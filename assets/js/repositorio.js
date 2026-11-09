@@ -1534,9 +1534,112 @@
       tipos: (Array.isArray(c.tipos) ? c.tipos : []).map(String).slice(0, 8),
       ...(Array.isArray(c.valores) ? { valores: c.valores.map(String).filter(v => /^[A-Za-z][A-Za-z_\-.]{0,29}$/.test(v)).slice(0, 10) } : {})
     })).filter(c => c.caminho && !c.caminho.includes('@'));
-    const item = x => ({ amostra: x.amostra, perfilCrm: x.perfilCrm, status: x.status, falha: x.falha || null, campos: limpaCampos(x.campos) });
+    const CONCLUSOES = ['descadastro_encontrado', 'nenhum_evento_retornado', 'inconclusivo_processando', 'inconclusivo_formato', 'inconclusivo_filtro_ignorado', 'erro'];
+    const inteiro = v => (Number.isInteger(v) && v >= 0 && v < 1e9 ? v : null);
+    const limpaResposta = r => (r && typeof r === 'object' ? {
+      tipoConteudo: /^[a-z]+\/[a-z0-9.+-]{1,60}$|^(ausente|outro)$/.test(String(r.tipoConteudo)) ? String(r.tipoConteudo) : 'outro',
+      bytes: inteiro(r.bytes), retryAfterSeg: inteiro(r.retryAfterSeg),
+      location: r.location && typeof r.location === 'object'
+        ? { mesmoHost: r.location.mesmoHost === true, caminho: String(r.location.caminho || '').replace(/[^A-Za-z0-9_\-/{}]/g, '').slice(0, 120) } : null,
+      cabecalhos: (Array.isArray(r.cabecalhos) ? r.cabecalhos : []).map(String).filter(n => /^[a-z0-9-]{1,40}$/.test(n)).slice(0, 30)
+    } : null);
+    const item = x => ({ amostra: x.amostra, perfilCrm: x.perfilCrm, status: x.status, falha: x.falha || null, campos: limpaCampos(x.campos),
+      ...(x.conclusao !== undefined ? { conclusao: CONCLUSOES.includes(x.conclusao) ? x.conclusao : 'erro' } : {}),
+      ...(Array.isArray(x.tentativas) ? { tentativas: x.tentativas.slice(0, 2).map(t => ({ status: inteiro(t.status), falha: /^[a-z_]{1,30}$/.test(String(t.falha || '')) ? t.falha : null,
+                                                                                      resposta: limpaResposta(t.resposta), campos: limpaCampos(t.campos) })) } : {}) });
     return { amostras: d.amostras, leituras: d.leituras, limiteLeituras: d.limiteLeituras, interrompido: d.interrompido || null,
              contatos: d.contatos.map(item), atividade: d.atividade.map(item), envioHabilitado: d.emailSendingEnabled === true, em: new Date() };
+  }
+
+  // ---------------------------------------------------------------------
+  // 0.14.0 — Automação de recompra (migração 020 + Edge Function "recompra-automacao")
+  // Tudo começa DESLIGADO. O banco confere administrador ativo com 2 etapas em cada chamada.
+  // A tela nunca recebe e-mails: só contagens, códigos e o nome do cliente no detalhe.
+  // ---------------------------------------------------------------------
+  const FUNCAO_RECOMPRA = 'recompra-automacao';
+  const MSG_RECOMPRA = {
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas.',
+    sessao_invalida: 'Sessão expirada. Saia e entre novamente.',
+    em_andamento: 'Já existe uma execução em andamento para esta automação. Aguarde alguns minutos.',
+    nao_encontrada: 'Automação não encontrada.',
+    invalido: 'Pedido inválido para esta automação.',
+    parametros_invalidos: 'Pedido inválido para esta automação.',
+    acao_invalida: 'A função publicada não reconhece esta ação. Confira se a versão 0.14.0 foi publicada.',
+    configuracao_incompleta: 'A função "recompra-automacao" está sem as variáveis do Supabase.',
+    banco: 'O banco recusou o pedido. Confira se a migração 020 foi aplicada.',
+  };
+  async function chamarRecompra(corpo, prazoMs) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem usar a automação de recompra.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), prazoMs);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_RECOMPRA, { body: corpo, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') {
+        const abort = /abort/i.test(String((err.context && (err.context.name || err.context.message)) || ''));
+        throw new ErroDados('rede', abort ? `A função não respondeu em ${Math.round(prazoMs / 1000)} segundos. Confira o histórico antes de tentar de novo.` : 'Não foi possível falar com o Supabase. Verifique a conexão e tente de novo.');
+      }
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
+      let codigo = '';
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); } catch (e) { codigo = ''; }
+      if (status === 404 && !MSG_RECOMPRA[codigo]) throw new ErroDados('integracao', 'Função "recompra-automacao" não encontrada. Confira se ela está publicada.', '404');
+      const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : status === 409 ? 'conflito' : 'integracao';
+      throw new ErroDados(tipo, MSG_RECOMPRA[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}.`, codigo || (status ? String(status) : ''));
+    }
+    if (!r.data || typeof r.data !== 'object') throw new ErroDados('integracao', 'Resposta inesperada da função "recompra-automacao".');
+    return r.data;
+  }
+  const CODIGO = v => (typeof v === 'string' && /^[a-z0-9_]{1,60}$/.test(v) ? v : null);
+  const contagens = o => { const s = {}; if (o && typeof o === 'object') Object.entries(o).forEach(([k, v]) => { if (CODIGO(k) && Number.isFinite(Number(v))) s[k] = Number(v); }); return s; };
+  /** Painel: chave geral, automações (com bloqueios do modo real) e últimas execuções. */
+  async function recompraPainel() {
+    const d = await rpc('recompra_painel', {}, 'a automação de recompra');
+    if (!d || typeof d !== 'object' || !Array.isArray(d.automacoes)) throw new ErroDados('integracao', 'Resposta inesperada do banco. Confira se a migração 020 foi aplicada.');
+    return {
+      envioRealLiberado: !!(d.controle && d.controle.envio_real_liberado === true),
+      enviosUltimaHora: Number(d.envios_ultima_hora) || 0,
+      automacoes: d.automacoes.map(a => ({ id: a.id, nome: a.nome, produtos: a.produtos || [], produtosNomes: a.produtos_nomes || [], lista: a.nm_lista_id, trigger: a.trigger_key,
+        modo: a.modo, agendamento: a.agendamento_ativo === true, limite: a.limite_por_execucao, intervalo: a.intervalo_reenvio_dias,
+        aprovadaEm: a.aprovada_em, aprovacaoExecucao: a.aprovacao_execucao, atualizadaEm: a.atualizada_em, bloqueiosReal: (a.bloqueios_real || []).map(CODIGO).filter(Boolean) })),
+      execucoes: (d.execucoes || []).map(e => ({ id: e.id, automacao: e.automacao_id, modo: e.modo, origem: e.origem, status: CODIGO(e.status), iniciadaEm: e.iniciada_em,
+        concluidaEm: e.concluida_em, bloqueios: (e.bloqueios || []).map(CODIGO).filter(Boolean), erro: CODIGO(e.erro_codigo), api: contagens(e.api),
+        crm: contagens(e.contadores && e.contadores.crm), nm: contagens(e.contadores && e.contadores.nuvem_marketing), acoes: contagens(e.contadores && e.contadores.acoes) })),
+      lidoEm: new Date() };
+  }
+  function recompraSalvarAutomacao(a) {
+    if (!Array.isArray(a.produtos) || !a.produtos.length || a.produtos.some(x => !UUID_RE.test(String(x)))) return Promise.reject(new ErroDados('validacao', 'Escolha um produto.'));
+    return rpc('recompra_automacao_salvar', { p_id: a.id || null, p_nome: a.nome, p_produtos: a.produtos, p_lista: a.lista || null,
+      p_trigger: a.trigger || null, p_limite: a.limite, p_intervalo: a.intervalo }, 'a automação');
+  }
+  const recompraAprovar = (automacao, execucao) => rpc('recompra_automacao_aprovar', { p_automacao: automacao, p_execucao: execucao }, 'a aprovação');
+  const recompraModo = (automacao, modo, agendamento) => rpc('recompra_automacao_modo', { p_automacao: automacao, p_modo: modo, p_agendamento: !!agendamento }, 'o modo da automação');
+  const recompraChaveGeral = ligar => rpc('recompra_chave_geral', { p_ligar: !!ligar }, 'a chave geral');
+  async function recompraExecucaoDetalhe(execucao) {
+    const d = await rpc('recompra_execucao_detalhe', { p_execucao: execucao }, 'o detalhe da execução');
+    return (Array.isArray(d) ? d : []).map(i => ({ cliente: i.cliente || 'Cliente anonimizado', compraRef: i.compra_ref, etapa: CODIGO(i.etapa_crm), resultado: CODIGO(i.resultado),
+      contato: CODIGO(i.nm_contato), estado: CODIGO(i.nm_estado), atividade: CODIGO(i.nm_atividade), acao: CODIGO(i.acao), detalhe: CODIGO(i.detalhe) }));
+  }
+  /** Executa (simulação ou real) pela Edge Function. Só contagens voltam ao navegador. */
+  async function recompraExecutar(automacao, modo) {
+    if (!UUID_RE.test(String(automacao || '')) || !['simulacao', 'real'].includes(modo)) throw new ErroDados('validacao', 'Pedido inválido.');
+    const d = await chamarRecompra({ acao: 'executar', automacao, modo }, 150000);
+    return { execucao: d.execucao || null, modo: d.modo, bloqueada: d.bloqueada === true, bloqueios: (d.bloqueios || []).map(CODIGO).filter(Boolean),
+             status: CODIGO(d.status), erro: CODIGO(d.erro), api: contagens(d.api) };
+  }
+  /** Quais Secrets o servidor tem (sem revelar valores). */
+  async function recompraEstadoServidor() {
+    const d = await chamarRecompra({ acao: 'estado' }, 30000);
+    const e = (d && d.estado) || {};
+    return { chaveApi: e.chave_api === true, conta: e.conta === true, urlTrigger: e.url_trigger_valida === true, envioRealServidor: e.envio_real_servidor === true, segredoAgendamento: e.segredo_agendamento === true };
   }
 
   /** Prévia da recompra por e-mail (só contagens; nada gravado). Só administrador com 2 etapas (o banco confere). */
@@ -1628,6 +1731,14 @@
     nuvemMarketingListas,
     nuvemMarketingDescobrirFormato,
     recompraEmailPrevia,
+    recompraPainel,
+    recompraSalvarAutomacao,
+    recompraAprovar,
+    recompraModo,
+    recompraChaveGeral,
+    recompraExecucaoDetalhe,
+    recompraExecutar,
+    recompraEstadoServidor,
     nuvemshopPainel,
     urlImagemLoja,
     // entregue uma única vez (para app.js, no carregamento); o cliente só chega após aal2

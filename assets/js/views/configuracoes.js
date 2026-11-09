@@ -226,6 +226,27 @@
     if (naTela()) A.router.render();
   }
   const PERFIL_CRM = { email_concedido_no_crm: 'e-mail concedido no CRM', email_revogado_ou_recusado_no_crm: 'e-mail revogado/recusado no CRM', comprador_sem_registro_de_email: 'comprador sem registro de e-mail' };
+  // Conclusão de /activity: só "descadastro_encontrado" afirma algo; nenhuma conclusão prova consentimento.
+  const CONCLUSAO_ATIVIDADE = {
+    descadastro_encontrado: ['A API devolveu evento de descadastro deste contato.', 'warn'],
+    nenhum_evento_retornado: ['A API respondeu 200 sem eventos. O período coberto não é documentado: isso NÃO prova ausência de descadastro.', 'warn'],
+    inconclusivo_processando: ['A API aceitou a consulta mas não entregou o resultado (HTTP 202). Inconclusivo: NÃO significa ausência de descadastro.', 'warn'],
+    inconclusivo_formato: ['Resposta 200 sem a lista de eventos esperada. Inconclusivo.', 'warn'],
+    inconclusivo_filtro_ignorado: ['A API devolveu eventos de outro tipo (o filtro de descadastro não foi aplicado). Inconclusivo.', 'warn'],
+    erro: ['Falha na consulta. Inconclusivo.', 'warn']
+  };
+  function descreverResposta(t) {
+    const r = t.resposta; if (!r) return `HTTP ${ui.esc(String(t.status))}${t.falha ? ` (${ui.esc(t.falha)})` : ''}`;
+    return [`HTTP ${t.status}`, t.falha ? `(${t.falha})` : '', `tipo ${r.tipoConteudo}`, r.bytes !== null ? `${r.bytes} bytes` : '',
+            r.retryAfterSeg !== null ? `Retry-After ${r.retryAfterSeg} s` : '', r.location ? `Location ${r.location.mesmoHost ? 'no mesmo endereço' : 'em OUTRO endereço'} ${r.location.caminho} (não seguido)` : 'sem Location',
+            r.cabecalhos.length ? `cabeçalhos: ${r.cabecalhos.join(', ')}` : ''].filter(Boolean).map(ui.esc).join(' · ');
+  }
+  function blocoAtividade(at) {
+    if (!at.conclusao) return '';
+    const [txt, tom] = CONCLUSAO_ATIVIDADE[at.conclusao] || CONCLUSAO_ATIVIDADE.erro;
+    return `<p class="small conclusao-atividade" data-conclusao="${ui.esc(at.conclusao)}">${ui.badge(at.conclusao.replace(/_/g, ' '), tom)} ${ui.esc(txt)}</p>
+      ${(at.tentativas || []).map((t, k) => `<p class="small muted resposta-atividade">Leitura ${k + 1}: ${descreverResposta(t)}</p>`).join('')}`;
+  }
   function blocoFormato() {
     const f = prv.formato;
     const tabela = (cs, id) => cs.length ? `<div class="table-wrap"><table id="${id}"><thead><tr><th>Campo</th><th>Tipo</th><th>Valores de situação</th></tr></thead><tbody>
@@ -233,13 +254,14 @@
       : '<p class="muted small">Sem corpo de resposta.</p>';
     return `${prv.erroFormato ? `<p class="aviso-inline" id="formatoErro" role="alert">${ui.esc(prv.erroFormato)}</p>` : ''}
       ${f ? `<div id="formatoApi"><h3>Formato da API do Nuvem Marketing <span class="muted small">(somente leitura · ${ui.num(f.amostras)} amostra(s) · ${ui.num(f.leituras)} de ${ui.num(f.limiteLeituras)} leituras)</span></h3>
-        ${f.interrompido ? `<p class="small aviso-inline">A API pediu para parar (${ui.esc(f.interrompido)}): resultado parcial.</p>` : ''}
+        ${f.interrompido === 'limite_leituras' ? `<p class="small aviso-inline">Limite de ${ui.num(f.limiteLeituras)} leituras atingido (houve repetição após HTTP 202): resultado parcial.</p>`
+          : f.interrompido ? `<p class="small aviso-inline">A API pediu para parar (${ui.esc(f.interrompido)}): resultado parcial.</p>` : ''}
         ${!f.amostras ? '<p class="muted small">Nenhum cliente real com registro de e-mail ou compra do produto para usar como amostra.</p>' : ''}
         ${f.contatos.map((c, i) => { const at = f.atividade[i]; return `<details class="formato-amostra" ${i === 0 ? 'open' : ''}><summary>Amostra ${c.amostra} — ${ui.esc(PERFIL_CRM[c.perfilCrm] || c.perfilCrm)} · contato: HTTP ${ui.esc(String(c.status))}${c.falha ? ` (${ui.esc(c.falha)})` : ''}${at ? ` · descadastros: HTTP ${ui.esc(String(at.status))}` : ''}</summary>
           <h4 class="small">GET /contacts/{e-mail}</h4>${tabela(c.campos, 'formatoContato' + c.amostra)}
-          ${at ? `<h4 class="small">GET /activity (descadastros)</h4>${tabela(at.campos, 'formatoAtividade' + at.amostra)}` : ''}</details>`; }).join('')}
+          ${at ? `<h4 class="small">GET /activity (descadastros)</h4>${blocoAtividade(at)}${tabela(at.campos, 'formatoAtividade' + at.amostra)}` : ''}</details>`; }).join('')}
         <div class="btn-row"><button class="btn btn-ghost btn-sm" type="button" id="copiarFormato">Copiar resultado (sem dados pessoais)</button></div>
-        <p class="small muted">Só nomes de campos, tipos e valores de situação (palavras curtas como "active"). Nenhum e-mail, nome, telefone, ID ou data. Nada foi criado ou alterado no Nuvem Marketing e nenhum e-mail foi enviado.</p></div>` : ''}`;
+        <p class="small muted">Só nomes de campos, tipos e valores de situação de uma lista fechada (como "active"). Nenhum e-mail, nome, telefone, ID ou data. "active" e interesses inscritos não provam consentimento. Nada foi criado ou alterado no Nuvem Marketing e nenhum e-mail foi enviado.</p></div>` : ''}`;
   }
   const ROTULO_CONTADOR = k => k.replace(/\./g, ' · ').replace(/_/g, ' ');
   function secaoPreviaRecompra(admin) {
@@ -401,6 +423,8 @@
 
       ${secaoPreviaRecompra(admin)}
 
+      ${A.recompraAutomacao ? A.recompraAutomacao.secao(admin) : ''}
+
       <section class="card">
         <header class="card-head"><h2>Base local de teste — NÃO é backup do Supabase</h2>${ui.badge('Dados fictícios', 'warn')}</header>
         <p>${ui.esc(db.meta.aviso)} Gerada em ${ui.date(db.meta.geradoEm)}: ${db.clientes.length} clientes, ${db.pedidos.length} pedidos, ${db.leads.length} contatos no funil. Fica salva apenas neste navegador.</p>
@@ -450,6 +474,7 @@
       const tc = root.querySelector('#testarConexaoNuvemMarketing');
       if (tc) tc.addEventListener('click', testarConexaoNuvemMarketing);
       if (A.session.isAdmin()) carregarProdutosPrevia();
+      if (A.recompraAutomacao) A.recompraAutomacao.bind(root);
       const pp = root.querySelector('#previaProduto');
       if (pp) pp.addEventListener('change', () => { prv.chave = pp.value; prv.resultado = null; prv.erro = null; A.router.render(); });
       const cp = root.querySelector('#calcularPrevia');
