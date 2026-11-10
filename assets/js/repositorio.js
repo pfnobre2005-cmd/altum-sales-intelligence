@@ -1564,7 +1564,7 @@
     nao_encontrada: 'Automação não encontrada.',
     invalido: 'Pedido inválido para esta automação.',
     parametros_invalidos: 'Pedido inválido para esta automação.',
-    acao_invalida: 'A função publicada não reconhece esta ação. Publique o código da versão 0.14.1 em Edge Functions → recompra-automacao.',
+    acao_invalida: 'A função publicada não reconhece esta ação. Publique o código da versão 0.16.0 em Edge Functions → recompra-automacao.',
     configuracao_incompleta: 'A função "recompra-automacao" está sem as variáveis automáticas do Supabase (URL e chaves do projeto).',
     erro_interno: 'Erro interno na função "recompra-automacao". Veja Edge Functions → recompra-automacao → Logs.',
     metodo_invalido: 'Chamada inválida para a função "recompra-automacao".',
@@ -1602,10 +1602,12 @@
     // ainda publicado), nada de "Falta" ou "Simulação — null": erro explícito com o que fazer.
     const d = r.data;
     if (!d || typeof d !== 'object' || d.funcao !== FUNCAO_RECOMPRA || typeof d.versao !== 'string')
-      throw new ErroDados('integracao', 'A função "recompra-automacao" publicada no Supabase não é a do ALTUM (resposta sem identificação). Em Edge Functions → recompra-automacao → Code, substitua TODO o código pelo arquivo index.ts da versão 0.14.1 e clique em Deploy.', 'funcao_desconhecida');
+      throw new ErroDados('integracao', 'A função "recompra-automacao" publicada no Supabase não é a do ALTUM (resposta sem identificação). Em Edge Functions → recompra-automacao → Code, substitua TODO o código pelo arquivo index.ts da versão 0.16.0 e clique em Deploy.', 'funcao_desconhecida');
     return d;
   }
   const CODIGO = v => (typeof v === 'string' && /^[a-z0-9_]{1,60}$/.test(v) ? v : null);
+  const TRIGGER_RE = /^[a-z0-9_]{1,30}$/, GRUPO_RE = /^(ns:[0-9]{1,18}:[0-9]{1,18}|p:[0-9a-f-]{36})$/;
+  const gatilhosValidos = o => { const g = {}; if (o && typeof o === 'object') Object.entries(o).forEach(([k, v]) => { if (GRUPO_RE.test(k) && TRIGGER_RE.test(String(v))) g[k] = v; }); return g; };
   const contagens = o => { const s = {}; if (o && typeof o === 'object') Object.entries(o).forEach(([k, v]) => { if (CODIGO(k) && Number.isFinite(Number(v))) s[k] = Number(v); }); return s; };
   /** Painel: chave geral, automações (com bloqueios do modo real) e últimas execuções. */
   async function recompraPainel() {
@@ -1616,7 +1618,14 @@
       enviosUltimaHora: Number(d.envios_ultima_hora) || 0,
       automacoes: d.automacoes.map(a => ({ id: a.id, nome: a.nome, produtos: a.produtos || [], produtosNomes: a.produtos_nomes || [], lista: a.nm_lista_id, trigger: a.trigger_key,
         modo: a.modo, agendamento: a.agendamento_ativo === true, limite: a.limite_por_execucao, intervalo: a.intervalo_reenvio_dias,
-        aprovadaEm: a.aprovada_em, aprovacaoExecucao: a.aprovacao_execucao, atualizadaEm: a.atualizada_em, bloqueiosReal: (a.bloqueios_real || []).map(CODIGO).filter(Boolean) })),
+        aprovadaEm: a.aprovada_em, aprovacaoExecucao: a.aprovacao_execucao, atualizadaEm: a.atualizada_em, bloqueiosReal: (a.bloqueios_real || []).map(CODIGO).filter(Boolean),
+        // 0.16.0 (migração 022): abrangência, intervalo por pessoa e gatilho por família (só códigos válidos)
+        abrangencia: a.abrangencia === 'todos' ? 'todos' : 'produtos', intervaloPessoa: Number(a.intervalo_pessoa_dias) || 7,
+        gatilhos: gatilhosValidos(a.gatilhos) })),
+      familias: (Array.isArray(d.familias) ? d.familias : []).filter(f => f && GRUPO_RE.test(String(f.grupo)))
+        .map(f => ({ grupo: f.grupo, nome: String(f.nome || ''), variantes: Number(f.variantes) || 1, cicloMin: Number(f.ciclo_min) || null, cicloMax: Number(f.ciclo_max) || null })),
+      produtosSemCiclo: Number(d.produtos_sem_ciclo) || 0,
+      migracao022: Array.isArray(d.familias),
       execucoes: (d.execucoes || []).map(e => ({ id: e.id, automacao: e.automacao_id, modo: e.modo, origem: e.origem, status: CODIGO(e.status), iniciadaEm: e.iniciada_em,
         concluidaEm: e.concluida_em, bloqueios: (e.bloqueios || []).map(CODIGO).filter(Boolean), erro: CODIGO(e.erro_codigo), api: contagens(e.api),
         crm: contagens(e.contadores && e.contadores.crm), nm: contagens(e.contadores && e.contadores.nuvem_marketing), acoes: contagens(e.contadores && e.contadores.acoes) })),
@@ -1630,9 +1639,24 @@
   const recompraAprovar = (automacao, execucao) => rpc('recompra_automacao_aprovar', { p_automacao: automacao, p_execucao: execucao }, 'a aprovação');
   const recompraModo = (automacao, modo, agendamento) => rpc('recompra_automacao_modo', { p_automacao: automacao, p_modo: modo, p_agendamento: !!agendamento }, 'o modo da automação');
   const recompraChaveGeral = ligar => rpc('recompra_chave_geral', { p_ligar: !!ligar }, 'a chave geral');
+  /** 0.16.0: abrangência ("produtos" | "todos") e intervalo mínimo por pessoa. Desfaz a aprovação. */
+  function recompraAbrangencia(automacao, abrangencia, intervaloPessoa) {
+    const n = Number(intervaloPessoa);
+    if (!UUID_RE.test(String(automacao || '')) || !['produtos', 'todos'].includes(abrangencia) || !Number.isInteger(n) || n < 1 || n > 90)
+      return Promise.reject(new ErroDados('validacao', 'Escolha a abrangência e um intervalo por pessoa de 1 a 90 dias.'));
+    return rpc('recompra_automacao_abrangencia', { p_automacao: automacao, p_abrangencia: abrangencia, p_intervalo_pessoa: n }, 'a abrangência');
+  }
+  /** 0.16.0: gatilho (trigger_key do Custom Trigger) de uma família; vazio remove. Desfaz a aprovação. */
+  function recompraGatilhoProduto(automacao, grupo, trigger) {
+    const t = trigger ? String(trigger).trim() : null;
+    if (!UUID_RE.test(String(automacao || '')) || !GRUPO_RE.test(String(grupo || '')) || (t && !TRIGGER_RE.test(t)))
+      return Promise.reject(new ErroDados('validacao', 'trigger_key: só minúsculas, números e _ (até 30).'));
+    return rpc('recompra_produto_gatilho_definir', { p_automacao: automacao, p_grupo: grupo, p_trigger: t }, 'o gatilho do produto');
+  }
   async function recompraExecucaoDetalhe(execucao) {
     const d = await rpc('recompra_execucao_detalhe', { p_execucao: execucao }, 'o detalhe da execução');
-    return (Array.isArray(d) ? d : []).map(i => ({ cliente: i.cliente || 'Cliente anonimizado', compraRef: i.compra_ref, etapa: CODIGO(i.etapa_crm), resultado: CODIGO(i.resultado),
+    return (Array.isArray(d) ? d : []).map(i => ({ cliente: i.cliente || 'Cliente anonimizado', compraRef: i.compra_ref, produto: typeof i.produto === 'string' ? i.produto : null,
+      gatilho: TRIGGER_RE.test(String(i.trigger_key)) ? i.trigger_key : null, etapa: CODIGO(i.etapa_crm), resultado: CODIGO(i.resultado),
       contato: CODIGO(i.nm_contato), estado: CODIGO(i.nm_estado), atividade: CODIGO(i.nm_atividade), acao: CODIGO(i.acao), detalhe: CODIGO(i.detalhe) }));
   }
   /** Executa (simulação ou real) pela Edge Function. Só contagens voltam ao navegador. */
@@ -1641,7 +1665,7 @@
     const d = await chamarRecompra({ acao: 'executar', automacao, modo }, 150000);
     const STATUS_OK = ['concluida', 'concluida_com_avisos', 'falhou', 'bloqueada'];
     if (!UUID_RE.test(String(d.execucao || '')) || !STATUS_OK.includes(d.status) || (d.modo !== 'simulacao' && d.modo !== 'real'))
-      throw new ErroDados('integracao', `Resposta incompleta da função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}): nenhuma execução foi informada. Atualize a função para a 0.14.1 e confira o histórico.`, 'resposta_incompleta');
+      throw new ErroDados('integracao', `Resposta incompleta da função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}): nenhuma execução foi informada. Atualize a função para a 0.16.0 e confira o histórico.`, 'resposta_incompleta');
     return { execucao: d.execucao, versao: d.versao, modo: d.modo, bloqueada: d.bloqueada === true, bloqueios: (d.bloqueios || []).map(CODIGO).filter(Boolean),
              status: d.status, erro: CODIGO(d.erro), api: contagens(d.api) };
   }
@@ -1651,7 +1675,7 @@
     const e = d.estado;
     const campos = ['chave_api', 'conta', 'url_trigger_valida', 'envio_real_servidor', 'segredo_agendamento'];
     if (!e || typeof e !== 'object' || campos.some(k => typeof e[k] !== 'boolean'))      // nunca "Falta" por resposta inesperada
-      throw new ErroDados('integracao', `A função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}) não informou os Secrets. Atualize-a para a 0.14.1.`, 'resposta_incompleta');
+      throw new ErroDados('integracao', `A função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}) não informou os Secrets. Atualize-a para a 0.16.0.`, 'resposta_incompleta');
     return { versao: d.versao, chaveApi: e.chave_api, conta: e.conta, urlTrigger: e.url_trigger_valida, envioRealServidor: e.envio_real_servidor, segredoAgendamento: e.segredo_agendamento };
   }
 
@@ -1832,6 +1856,8 @@
     carrinhosVerificar,
     recompraSalvarAutomacao,
     recompraAprovar,
+    recompraAbrangencia,
+    recompraGatilhoProduto,
     recompraModo,
     recompraChaveGeral,
     recompraExecucaoDetalhe,

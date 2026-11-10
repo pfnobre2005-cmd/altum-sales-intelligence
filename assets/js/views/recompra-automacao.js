@@ -5,6 +5,8 @@
   // Só administrador com 2 etapas. Tudo começa DESLIGADO: simulação primeiro, aprovação, modo real,
   // chave geral e Secret do servidor. A tela recebe só contagens e códigos (nome do cliente só no detalhe).
   // Estado só em memória.
+  // 0.16.0 (migração 022): abrangência "todos os produtos" (famílias reais, ativas e com ciclo), gatilho do
+  // Custom Trigger POR FAMÍLIA (sem gatilho = nunca vai ao envio real), um e-mail por pessoa por execução.
   // =====================================================================
   const { ui } = A;
   const R = () => A.repositorio;
@@ -24,12 +26,14 @@
     executada_recentemente: 'já rodou nas últimas 20 horas',
     em_andamento: 'já havia uma execução em andamento',
     automacao_inexistente: 'automação inexistente',
+    nenhum_produto_com_ciclo: 'nenhum produto real e ativo tem ciclo de recompra cadastrado',
+    nenhum_produto_com_gatilho: 'nenhum produto tem gatilho (trigger_key) definido',
   };
   const ERRO = {
     envio_real_desligado_no_servidor: 'o servidor não liberou o envio real (Secret RECOMPRA_ENVIO_REAL diferente de "ativado")',
     url_trigger_ausente_ou_invalida: 'falta o Secret NUVEM_MARKETING_TRIGGER_URL (URL oficial do Custom Trigger)',
     segredos_ausentes: 'faltam os Secrets da API do Nuvem Marketing',
-    api_recusou_401: 'a API recusou a chave (401)', api_recusou_403: 'a chave não tem permissão (403)',
+    api_recusou_401: 'a API do Nuvem Marketing recusou a chave (401)', api_recusou_403: 'a chave não tem permissão (403)',
     api_limitou_429: 'a API limitou as chamadas (429): o resto ficou sem auditoria', api_limitou_503: 'a API ficou indisponível (503): o resto ficou sem auditoria',
     trigger_limitou_429: 'o Custom Trigger atingiu o limite (200 eventos/h): disparos interrompidos',
     tempo_esgotado: 'tempo da função esgotado: o resto ficou sem auditoria',
@@ -39,7 +43,11 @@
                    falhou: ['Falhou', 'warn'], bloqueada: ['Bloqueada', 'muted'], abandonada: ['Interrompida', 'muted'] };
   const ETAPA = { candidato: 'Candidato (CRM ok)', bloqueado_crm: 'Bloqueado no CRM', sem_consentimento_crm: 'Sem autorização de e-mail', descadastrado_crm: 'Descadastrado no CRM',
                   recusa_vinculada: 'Recusa no mesmo e-mail/cadastro vinculado', sem_email: 'Sem e-mail', fora_da_janela: 'Fora da janela', ja_enviado: 'Já enviado',
-                  email_duplicado: 'E-mail repetido', acima_do_limite: 'Acima do limite (próxima execução)' };
+                  email_duplicado: 'E-mail repetido', acima_do_limite: 'Acima do limite (próxima execução)',
+                  outro_produto_nesta_execucao: 'Outro produto nesta execução (1 e-mail por pessoa)', intervalo_pessoa: 'Recebeu e-mail de recompra há pouco',
+                  sem_gatilho_produto: 'Produto sem gatilho (não enviado)' };
+  const DETALHE = { sem_gatilho_para_produto: 'produto sem gatilho: não seria enviado', funcao_desatualizada: 'função desatualizada: publique a 0.16.0',
+                    gatilho_divergente: 'gatilho diferente do definido', intervalo_pessoa: 'intervalo por pessoa', sincronizaria_e_dispararia: 'sincronizaria e dispararia' };
   const RESULTADO = { autorizado: ['Autorizado', 'sage'], descadastrado_nm: ['Descadastrado no Nuvem Marketing', 'warn'], bloqueado_nm: ['Bloqueado no Nuvem Marketing', 'warn'],
                       inconclusivo_nm: ['Inconclusivo (não autorizado)', 'sand'], nao_auditado: ['Não auditado (não autorizado)', 'muted'] };
   const ACAO = { nenhuma: '—', simulada: 'Simulado (nada enviado)', sincronizada: 'Sincronizado', evento_enviado: 'E-mail disparado (Custom Trigger)',
@@ -76,7 +84,7 @@
   }
   function resumoExecucao(r) {
     if (r.bloqueada) return `Execução ${r.modo === 'real' ? 'REAL' : 'de simulação'} bloqueada: ${lista(r.bloqueios, BLOQUEIO)}. Nada foi enviado.`;
-    const st = (STATUS[r.status] || [r.status])[0];
+    const st = (STATUS[r.status] || ['Situação desconhecida'])[0];
     return `${r.modo === 'real' ? 'Execução real' : 'Simulação'} — ${st}${r.erro ? ` (${ERRO[r.erro] || r.erro})` : ''}. Veja o histórico abaixo.`;
   }
   // confirmação no próprio botão (1º clique explica e vira "Confirmar"; 2º executa; volta sozinho em 8 s)
@@ -89,15 +97,24 @@
     return false;
   }
 
+  // Secrets em três grupos: só os da simulação podem "faltar"; os do envio real e do agendamento
+  // ficam "não necessário agora" até a ativação (nunca contam como erro).
   function blocoServidor() {
-    const s = rc.servidor, item = (okk, txt) => `<li>${ui.badge(okk ? 'OK' : 'Falta', okk ? 'sage' : 'muted')} ${txt}</li>`;
+    const s = rc.servidor;
+    const obrig = (okk, txt) => `<li data-secret="obrigatorio">${ui.badge(okk ? 'OK' : 'Falta', okk ? 'sage' : 'warn')} ${txt}</li>`;
+    const opc = (okk, txt) => `<li data-secret="opcional">${ui.badge(okk ? 'Configurado' : 'Não necessário agora', okk ? 'sand' : 'muted')} ${txt}</li>`;
+    const antiga = s && !/^0\.(1[6-9]|[2-9][0-9])\./.test(String(s.versao)) && !/^[1-9]/.test(String(s.versao));
     return `<div class="btn-row"><button class="btn btn-ghost btn-sm" type="button" id="recServidor" ${rc.ocupado ? 'disabled' : ''}>Conferir Secrets do servidor</button></div>
-      ${rc.erroServidor ? `<p class="aviso-inline">${ui.esc(rc.erroServidor)}</p>` : ''}
-      ${s ? `<ul class="lista-simples small" id="recServidorLista">
-        ${item(s.chaveApi, 'NUVEM_MARKETING_API_KEY')}${item(s.conta, 'NUVEM_MARKETING_CONTA')}
-        ${item(s.urlTrigger, 'NUVEM_MARKETING_TRIGGER_URL (URL oficial do Custom Trigger — só para o envio real)')}
-        ${item(s.envioRealServidor, 'RECOMPRA_ENVIO_REAL = "ativado" (trava do servidor — só na ativação)')}
-        ${item(s.segredoAgendamento, 'RECOMPRA_CRON_SECRET (só para o agendamento)')}</ul>` : ''}`;
+      ${rc.erroServidor ? `<p class="aviso-inline" role="alert" id="recServidorErro">${ui.esc(rc.erroServidor)}</p>` : ''}
+      ${s ? `<div id="recServidorLista" class="small"><p class="muted">Função publicada: recompra-automacao ${ui.esc(s.versao)}</p>
+        <p><strong>Para simular</strong> ${s.chaveApi && s.conta ? ui.badge('pronto', 'sage') : ui.badge('incompleto', 'warn')}</p>
+        <ul class="lista-simples">${obrig(s.chaveApi, 'NUVEM_MARKETING_API_KEY')}${obrig(s.conta, 'NUVEM_MARKETING_CONTA')}</ul>
+        <p><strong>Só para o envio real</strong> (criar apenas na ativação)</p>
+        <ul class="lista-simples">${opc(s.urlTrigger, 'NUVEM_MARKETING_TRIGGER_URL (URL oficial do Custom Trigger)')}${opc(s.envioRealServidor, 'RECOMPRA_ENVIO_REAL = "ativado" (trava do servidor)')}</ul>
+        <p><strong>Só para o agendamento</strong></p>
+        <ul class="lista-simples">${opc(s.segredoAgendamento, 'RECOMPRA_CRON_SECRET')}</ul>
+        ${antiga ? '<p class="aviso-inline" id="recFuncaoAntiga">A função publicada é anterior à 0.16.0: a abrangência "todos os produtos" não envia nada (o banco recusa a reserva). Publique o index.ts da 0.16.0.</p>' : ''}
+        ${!(s.chaveApi && s.conta) ? '<p class="aviso-inline">Sem a chave e a conta do Nuvem Marketing a simulação termina como "Falhou" (registrada no histórico). Confira os Secrets em Edge Functions → Secrets.</p>' : ''}</div>` : ''}`;
   }
   function formulario() {
     const e = rc.edicao; if (!e) return '';
@@ -125,8 +142,10 @@
     return `<article class="card-sub recAutomacao" data-id="${ui.esc(a.id)}">
       <div class="integ-head"><h3>${ui.esc(a.nome)}</h3>${ui.badge(a.modo === 'real' ? 'Modo real' : 'Simulação', a.modo === 'real' ? 'warn' : 'muted')}
         ${ui.badge(a.agendamento ? 'Agendamento ligado' : 'Agendamento desligado', a.agendamento ? 'sand' : 'muted')}</div>
-      <p class="small">${ui.esc(a.produtosNomes.join(', '))} · lista ${a.lista ? '#' + ui.esc(String(a.lista)) : '<em>não definida</em>'} · trigger ${a.trigger ? `<code>${ui.esc(a.trigger)}</code>` : '<em>não definido</em>'}
-        · até ${ui.num(a.limite)} por execução · reenvio após ${ui.num(a.intervalo)} dias · ${ui.esc(aprovada)}</p>
+      <p class="small">${a.abrangencia === 'todos' ? '<strong>Todos os produtos com ciclo</strong> (gatilho por produto)' : ui.esc(a.produtosNomes.join(', '))} · lista ${a.lista ? '#' + ui.esc(String(a.lista)) : '<em>não definida</em>'}
+        ${a.abrangencia === 'todos' ? '' : `· trigger ${a.trigger ? `<code>${ui.esc(a.trigger)}</code>` : '<em>não definido</em>'}`}
+        · até ${ui.num(a.limite)} por execução · reenvio do mesmo produto após ${ui.num(a.intervalo)} dias · no máximo 1 e-mail por pessoa a cada ${ui.num(a.intervaloPessoa)} dias · ${ui.esc(aprovada)}</p>
+      ${p.migracao022 ? blocoAbrangencia(a, p) : ''}
       <p class="small ${podeReal ? '' : 'muted'} recBloqueios">${podeReal ? '<strong>Envio real liberado no banco.</strong> O servidor ainda exige o Secret RECOMPRA_ENVIO_REAL.' : `Envio real bloqueado: ${ui.esc(lista(a.bloqueiosReal, BLOQUEIO))}.`}</p>
       <div class="btn-row">
         <button class="btn btn-primary btn-sm" type="button" data-rec="simular" data-id="${ui.esc(a.id)}" ${oc ? 'disabled' : ''}>${oc === 'simular:' + a.id ? 'Simulando…' : 'Simular agora (nada é enviado)'}</button>
@@ -137,6 +156,31 @@
         <button class="btn btn-danger btn-sm" type="button" data-rec="real" data-id="${ui.esc(a.id)}" ${oc || !podeReal ? 'disabled' : ''}>Executar envio real agora</button>
         <button class="btn btn-ghost btn-sm" type="button" data-rec="editar" data-id="${ui.esc(a.id)}" ${oc ? 'disabled' : ''}>Editar</button>
       </div></article>`;
+  }
+  // Abrangência e gatilhos por família (022). Toda mudança desfaz a aprovação (o banco garante).
+  function blocoAbrangencia(a, p) {
+    const oc = rc.ocupado ? 'disabled' : '';
+    const form = `<form class="form-inline recAbrangencia" data-id="${ui.esc(a.id)}">
+        <label>Abrangência<select name="abrangencia">
+          <option value="produtos" ${a.abrangencia === 'produtos' ? 'selected' : ''}>Produtos escolhidos (um gatilho)</option>
+          <option value="todos" ${a.abrangencia === 'todos' ? 'selected' : ''}>Todos os produtos com ciclo (gatilho por produto)</option></select></label>
+        <label>1 e-mail por pessoa a cada (dias)<input name="intervaloPessoa" type="number" min="1" max="90" step="1" value="${ui.num(a.intervaloPessoa)}"></label>
+        <button class="btn btn-ghost btn-sm" type="submit" ${oc}>Aplicar</button></form>`;
+    if (a.abrangencia !== 'todos') return form;
+    const linhas = p.familias.map(f => { const g = a.gatilhos[f.grupo] || '';
+      const ciclo = f.cicloMin === f.cicloMax ? `${ui.num(f.cicloMin)} dias` : `${ui.num(f.cicloMin)}–${ui.num(f.cicloMax)} dias`;
+      return `<tr data-grupo="${ui.esc(f.grupo)}"><td>${ui.esc(f.nome)}${f.variantes > 1 ? ` <span class="muted">(${ui.num(f.variantes)} variantes)</span>` : ''}</td><td class="nowrap">${ciclo}</td>
+        <td>${g ? ui.badge('Com gatilho', 'sage') : ui.badge('Sem gatilho: não envia', 'muted')}</td>
+        <td><input class="recGatilhoInput" aria-label="trigger_key de ${ui.esc(f.nome)}" pattern="[a-z0-9_]{1,30}" maxlength="30" value="${ui.esc(g)}" placeholder="ex.: altum_recompra_juice"></td>
+        <td class="nowrap"><button class="btn btn-ghost btn-sm" type="button" data-rec="gatilho" data-id="${ui.esc(a.id)}" data-grupo="${ui.esc(f.grupo)}" ${oc}>Salvar</button>
+          ${g ? `<button class="btn btn-ghost btn-sm" type="button" data-rec="gatilhoRemover" data-id="${ui.esc(a.id)}" data-grupo="${ui.esc(f.grupo)}" ${oc}>Remover</button>` : ''}</td></tr>`; }).join('');
+    return `${form}
+      <p class="small aviso-inline">Cada produto usa o ciclo de recompra cadastrado no CRM. <strong>Produto sem gatilho nunca recebe envio real</strong> (a simulação mostra quem seria).
+        O evento leva <code>produto</code> no contexto: o e-mail do Nuvem Marketing só mostra o nome se o template usar <code>\${produto}</code>.
+        Antes de ligar outro produto a um gatilho já existente (ex.: <code>altum_recompra_juice</code>), confira o template e faça um teste com um contato seu no Nuvem Marketing.</p>
+      ${p.familias.length ? `<div class="table-wrap"><table class="recFamilias"><thead><tr><th>Produto</th><th>Ciclo</th><th>Situação</th><th>trigger_key</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>`
+        : '<p class="muted small">Nenhum produto real e ativo tem ciclo de recompra. Cadastre o ciclo em Produtos.</p>'}
+      ${p.produtosSemCiclo ? `<p class="small muted">${ui.num(p.produtosSemCiclo)} produto(s) ativo(s) sem ciclo ficam fora da automação.</p>` : ''}`;
   }
   function historico(p) {
     if (!p.execucoes.length) return '<p class="muted small">Nenhuma execução ainda.</p>';
@@ -157,12 +201,12 @@
     const d = rc.detalhe; if (!d && !rc.erroDetalhe) return '';
     if (rc.erroDetalhe) return `<p class="aviso-inline">${ui.esc(rc.erroDetalhe)}</p>`;
     return `<div id="recDetalhe"><h3>Clientes da execução de ${ui.esc(quando(d.iniciadaEm))}</h3>
-      <div class="table-wrap"><table id="recDetalheTabela"><thead><tr><th>Cliente</th><th>Compra de referência</th><th>CRM</th><th>Nuvem Marketing</th><th>Estado / atividade</th><th>Ação</th></tr></thead><tbody>
+      <div class="table-wrap"><table id="recDetalheTabela"><thead><tr><th>Cliente</th><th>Produto</th><th>Compra de referência</th><th>CRM</th><th>Nuvem Marketing</th><th>Estado / atividade</th><th>Ação</th></tr></thead><tbody>
       ${d.itens.map(i => { const r = RESULTADO[i.resultado];
-        return `<tr><td>${ui.esc(i.cliente)}</td><td class="nowrap">${i.compraRef ? ui.esc(new Date(i.compraRef + 'T12:00:00').toLocaleDateString('pt-BR')) : '—'}</td><td>${ui.esc(ETAPA[i.etapa] || i.etapa || '')}</td>
+        return `<tr><td>${ui.esc(i.cliente)}</td><td>${ui.esc(i.produto || '—')}${i.gatilho ? ` <code class="small">${ui.esc(i.gatilho)}</code>` : ''}</td><td class="nowrap">${i.compraRef ? ui.esc(new Date(i.compraRef + 'T12:00:00').toLocaleDateString('pt-BR')) : '—'}</td><td>${ui.esc(ETAPA[i.etapa] || i.etapa || '')}</td>
           <td>${r ? ui.badge(r[0], r[1]) : '<span class="muted">—</span>'}</td>
           <td class="small">${i.resultado ? `${ui.esc(i.contato === 'nao_encontrado' ? 'contato inexistente' : (i.estado || i.contato || '—'))} · ${ui.esc(ATIVIDADE[i.atividade] || '—')}` : ''}</td>
-          <td class="small">${ui.esc(ACAO[i.acao] || i.acao || '')}${i.detalhe ? ` <span class="muted">(${ui.esc(i.detalhe)})</span>` : ''}</td></tr>`; }).join('')}
+          <td class="small">${ui.esc(ACAO[i.acao] || i.acao || '')}${i.detalhe ? ` <span class="muted">(${ui.esc(DETALHE[i.detalhe] || i.detalhe)})</span>` : ''}</td></tr>`; }).join('')}
       </tbody></table></div></div>`;
   }
 
@@ -217,6 +261,16 @@
       acao('chave', () => R().recompraChaveGeral(true), 'Chave geral ligada.');
     });
     if (q('#recChaveDesligar')) q('#recChaveDesligar').addEventListener('click', () => acao('chave', () => R().recompraChaveGeral(false), 'Chave geral desligada: nenhum envio real começa.'));
+    root.querySelectorAll('#secaoAutomacaoRecompra form.recAbrangencia').forEach(f => f.addEventListener('submit', ev => {
+      ev.preventDefault();
+      const id = f.dataset.id, d = new FormData(f), a = rc.painel && rc.painel.automacoes.find(x => x.id === id);
+      const abr = String(d.get('abrangencia')), n = Number(d.get('intervaloPessoa'));
+      if (a && abr === a.abrangencia && n === a.intervaloPessoa) return;
+      const btn = f.querySelector('button[type=submit]');
+      if (!confirmar(btn, abr === 'todos' ? 'A automação passará a cobrir TODOS os produtos reais com ciclo, cada um com seu gatilho. A aprovação é desfeita e ela volta para simulação.'
+                                          : 'A aprovação é desfeita e a automação volta para simulação.')) return;
+      acao('abrangencia', () => R().recompraAbrangencia(id, abr, n), 'Abrangência salva. Rode uma nova simulação e aprove antes do envio real.');
+    }));
     root.querySelectorAll('#secaoAutomacaoRecompra [data-rec]').forEach(b => b.addEventListener('click', ev => {
       const t = ev.currentTarget, id = t.dataset.id, p = rc.painel, a = p && p.automacoes.find(x => x.id === id);
       switch (t.dataset.rec) {
@@ -231,6 +285,15 @@
         case 'real':
           if (!confirmar(t, 'Executar o ENVIO REAL agora: os contatos autorizados entram na lista e o Custom Trigger dispara o e-mail.')) return;
           return acao('real:' + id, () => R().recompraExecutar(id, 'real'), resumoExecucao);
+        case 'gatilho': {
+          const inp = t.closest('tr') && t.closest('tr').querySelector('.recGatilhoInput');
+          const v = inp ? inp.value.trim() : '';
+          if (!v) { rc.erroAcao = 'Informe o trigger_key (ou use "Remover").'; return render(); }
+          if (!confirmar(t, 'Este produto passará a disparar o Custom Trigger "' + v + '" (o template precisa existir no Nuvem Marketing). A aprovação é desfeita.')) return;
+          return acao('gatilho', () => R().recompraGatilhoProduto(id, t.dataset.grupo, v), 'Gatilho salvo. Rode uma nova simulação e aprove antes do envio real.');
+        }
+        case 'gatilhoRemover':
+          return acao('gatilho', () => R().recompraGatilhoProduto(id, t.dataset.grupo, null), 'Gatilho removido: esse produto não recebe envio real.');
         case 'editar':
           rc.edicao = a ? { id: a.id, nome: a.nome, produtos: a.produtos, lista: a.lista, trigger: a.trigger, limite: a.limite, intervalo: a.intervalo } : null; return render();
         case 'detalhe': {

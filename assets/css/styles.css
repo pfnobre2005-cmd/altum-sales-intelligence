@@ -411,6 +411,11 @@ details.historico summary { cursor: pointer; font-weight: 600; color: var(--ink-
 #secaoAutomacaoRecompra .card-sub .integ-head h3 { margin-right: auto; }
 #secaoAutomacaoRecompra .btn-row { margin-top: 10px; flex-wrap: wrap; }
 #secaoAutomacaoRecompra .lista-simples { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
+/* 0.16.0 — abrangência e gatilho por produto */
+#secaoAutomacaoRecompra .recAbrangencia { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 10px 0; }
+#secaoAutomacaoRecompra .recAbrangencia label { display: grid; gap: 4px; font-size: .85rem; }
+#secaoAutomacaoRecompra .recAbrangencia input { width: 90px; }
+#secaoAutomacaoRecompra .recFamilias .recGatilhoInput { width: 100%; min-width: 150px; max-width: 220px; }
 #secaoAutomacaoRecompra #recForm { margin: 12px 0; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 12px; }
 /* Carrinhos abandonados (0.15.0) */
 #carRecomendacoes .lista-simples, #carrinhosAdmin .lista-simples { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
