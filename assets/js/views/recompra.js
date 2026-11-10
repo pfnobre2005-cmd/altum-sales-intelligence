@@ -138,7 +138,7 @@
       if (!fic() && semFiltro()) {
         return `<section class="card estado-vazio" id="recompraVazio"><h2>Ainda não há oportunidades de recompra reais</h2>
           <p>As oportunidades aparecem quando existem <strong>pedidos pagos reais</strong> de <strong>produtos ativos com ciclo de recompra</strong> (defina o ciclo na <a href="#/produtos" class="link">Tela Produtos</a>).
-          Os pedidos ainda não são importados: a integração com a Nuvemshop será ativada numa próxima etapa e, a partir dela, os pedidos da loja entram aqui automaticamente.</p>
+          Os pedidos pagos da Nuvemshop são importados automaticamente. As oportunidades de recompra aparecem quando os produtos estão ativos e possuem um ciclo de reposição configurado.</p>
           ${permitirFicticios() && estado.existemFicticios ? '<div class="btn-row"><button class="btn btn-ghost" type="button" data-origem="ficticio">Ver dados fictícios de teste</button></div>' : ''}</section>`;
       }
       return `<section class="card" id="recompraSemResultado">${ui.empty('Nenhuma oportunidade com esses filtros.')}</section>`;
