@@ -1564,8 +1564,10 @@
     nao_encontrada: 'Automação não encontrada.',
     invalido: 'Pedido inválido para esta automação.',
     parametros_invalidos: 'Pedido inválido para esta automação.',
-    acao_invalida: 'A função publicada não reconhece esta ação. Confira se a versão 0.14.0 foi publicada.',
-    configuracao_incompleta: 'A função "recompra-automacao" está sem as variáveis do Supabase.',
+    acao_invalida: 'A função publicada não reconhece esta ação. Publique o código da versão 0.14.1 em Edge Functions → recompra-automacao.',
+    configuracao_incompleta: 'A função "recompra-automacao" está sem as variáveis automáticas do Supabase (URL e chaves do projeto).',
+    erro_interno: 'Erro interno na função "recompra-automacao". Veja Edge Functions → recompra-automacao → Logs.',
+    metodo_invalido: 'Chamada inválida para a função "recompra-automacao".',
     banco: 'O banco recusou o pedido. Confira se a migração 020 foi aplicada.',
   };
   async function chamarRecompra(corpo, prazoMs) {
@@ -1589,14 +1591,19 @@
       }
       if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
       const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
-      let codigo = '';
-      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); } catch (e) { codigo = ''; }
-      if (status === 404 && !MSG_RECOMPRA[codigo]) throw new ErroDados('integracao', 'Função "recompra-automacao" não encontrada. Confira se ela está publicada.', '404');
+      let codigo = '', nossa = false;
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); nossa = !!(c && c.funcao === FUNCAO_RECOMPRA); } catch (e) { codigo = ''; }
+      if (status === 404 && !nossa) throw new ErroDados('integracao', 'Função "recompra-automacao" não encontrada no Supabase. Confira o nome exato em Edge Functions.', '404');
+      if (status === 401 && !nossa) throw new ErroDados('sessao', 'O Supabase recusou a sessão antes de chegar à função. Em Edge Functions → recompra-automacao → Details, desligue "Verify JWT" (a função confere o administrador pelo banco) ou saia e entre de novo.', '401');
       const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : status === 409 ? 'conflito' : 'integracao';
-      throw new ErroDados(tipo, MSG_RECOMPRA[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}.`, codigo || (status ? String(status) : ''));
+      throw new ErroDados(tipo, MSG_RECOMPRA[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}${codigo ? ` [${codigo}]` : ''}.`, codigo || (status ? String(status) : ''));
     }
-    if (!r.data || typeof r.data !== 'object') throw new ErroDados('integracao', 'Resposta inesperada da função "recompra-automacao".');
-    return r.data;
+    // 0.14.1: só aceita resposta IDENTIFICADA da nossa função. Sem isso (ex.: código-modelo "Hello" do Supabase
+    // ainda publicado), nada de "Falta" ou "Simulação — null": erro explícito com o que fazer.
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.funcao !== FUNCAO_RECOMPRA || typeof d.versao !== 'string')
+      throw new ErroDados('integracao', 'A função "recompra-automacao" publicada no Supabase não é a do ALTUM (resposta sem identificação). Em Edge Functions → recompra-automacao → Code, substitua TODO o código pelo arquivo index.ts da versão 0.14.1 e clique em Deploy.', 'funcao_desconhecida');
+    return d;
   }
   const CODIGO = v => (typeof v === 'string' && /^[a-z0-9_]{1,60}$/.test(v) ? v : null);
   const contagens = o => { const s = {}; if (o && typeof o === 'object') Object.entries(o).forEach(([k, v]) => { if (CODIGO(k) && Number.isFinite(Number(v))) s[k] = Number(v); }); return s; };
@@ -1632,14 +1639,101 @@
   async function recompraExecutar(automacao, modo) {
     if (!UUID_RE.test(String(automacao || '')) || !['simulacao', 'real'].includes(modo)) throw new ErroDados('validacao', 'Pedido inválido.');
     const d = await chamarRecompra({ acao: 'executar', automacao, modo }, 150000);
-    return { execucao: d.execucao || null, modo: d.modo, bloqueada: d.bloqueada === true, bloqueios: (d.bloqueios || []).map(CODIGO).filter(Boolean),
-             status: CODIGO(d.status), erro: CODIGO(d.erro), api: contagens(d.api) };
+    const STATUS_OK = ['concluida', 'concluida_com_avisos', 'falhou', 'bloqueada'];
+    if (!UUID_RE.test(String(d.execucao || '')) || !STATUS_OK.includes(d.status) || (d.modo !== 'simulacao' && d.modo !== 'real'))
+      throw new ErroDados('integracao', `Resposta incompleta da função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}): nenhuma execução foi informada. Atualize a função para a 0.14.1 e confira o histórico.`, 'resposta_incompleta');
+    return { execucao: d.execucao, versao: d.versao, modo: d.modo, bloqueada: d.bloqueada === true, bloqueios: (d.bloqueios || []).map(CODIGO).filter(Boolean),
+             status: d.status, erro: CODIGO(d.erro), api: contagens(d.api) };
   }
   /** Quais Secrets o servidor tem (sem revelar valores). */
   async function recompraEstadoServidor() {
     const d = await chamarRecompra({ acao: 'estado' }, 30000);
-    const e = (d && d.estado) || {};
-    return { chaveApi: e.chave_api === true, conta: e.conta === true, urlTrigger: e.url_trigger_valida === true, envioRealServidor: e.envio_real_servidor === true, segredoAgendamento: e.segredo_agendamento === true };
+    const e = d.estado;
+    const campos = ['chave_api', 'conta', 'url_trigger_valida', 'envio_real_servidor', 'segredo_agendamento'];
+    if (!e || typeof e !== 'object' || campos.some(k => typeof e[k] !== 'boolean'))      // nunca "Falta" por resposta inesperada
+      throw new ErroDados('integracao', `A função "recompra-automacao" (versão ${String(d.versao).slice(0, 12)}) não informou os Secrets. Atualize-a para a 0.14.1.`, 'resposta_incompleta');
+    return { versao: d.versao, chaveApi: e.chave_api, conta: e.conta, urlTrigger: e.url_trigger_valida, envioRealServidor: e.envio_real_servidor, segredoAgendamento: e.segredo_agendamento };
+  }
+
+  // ---------------------------------------------------------------------
+  // 0.15.0 — Carrinhos abandonados (migração 021 + Edge Function "nuvemshop-carrinhos", somente leitura na loja)
+  // A tela nunca recebe e-mails: agregados, códigos e o nome de clientes já cadastrados.
+  // ---------------------------------------------------------------------
+  const FUNCAO_CARRINHOS = 'nuvemshop-carrinhos';
+  const MSG_CARRINHOS = {
+    sem_permissao: 'Somente administrador ativo com verificação em 2 etapas.',
+    sessao_invalida: 'Sessão expirada. Saia e entre novamente.',
+    em_andamento: 'Já existe uma leitura de carrinhos em andamento. Aguarde alguns minutos.',
+    acao_invalida: 'A função publicada não reconhece esta ação. Publique o código da versão 0.15.0 em Edge Functions → nuvemshop-carrinhos.',
+    configuracao_incompleta: 'A função "nuvemshop-carrinhos" está sem as variáveis automáticas do Supabase.',
+    token_nuvemshop_ausente: 'Falta o Secret NUVEMSHOP_ACCESS_TOKEN (o mesmo da sincronização da Nuvemshop).',
+    nuvemshop_sem_permissao_401: 'A Nuvemshop recusou o token (401).',
+    nuvemshop_sem_permissao_403: 'O app da Nuvemshop não tem a permissão read_orders para ler carrinhos (403).',
+    nuvemshop_limite_de_chamadas: 'A Nuvemshop limitou as chamadas. Tente de novo em alguns minutos.',
+    nuvemshop_sem_resposta: 'A Nuvemshop não respondeu. Tente de novo em alguns minutos.',
+    nuvemshop_indisponivel: 'A Nuvemshop está indisponível agora. Tente de novo em alguns minutos.',
+    tempo_esgotado: 'A leitura passou do tempo da função. Tente de novo.',
+    banco_aplicar: 'O banco recusou os carrinhos lidos. Confira se a migração 021 foi aplicada.',
+    banco_inicio: 'O banco recusou a leitura. Confira se a migração 021 foi aplicada.',
+    erro_interno: 'Erro interno na função "nuvemshop-carrinhos". Veja Edge Functions → nuvemshop-carrinhos → Logs.',
+  };
+  async function chamarCarrinhos(corpo, prazoMs) {
+    exigirCliente();
+    if (!A.session.isAdmin()) throw new ErroDados('permissao', 'Somente administradores podem ler os carrinhos da Nuvemshop.');
+    let nivel;
+    try { nivel = await sb.auth.mfa.getAuthenticatorAssuranceLevel(); } catch (e) { nivel = { error: e }; }
+    if (nivel.error || !nivel.data || nivel.data.currentLevel !== 'aal2')
+      throw new ErroDados('sessao', 'A verificação em 2 etapas desta sessão não foi confirmada. Saia e entre novamente.');
+    const ctrl = new AbortController();
+    const prazo = setTimeout(() => ctrl.abort(), prazoMs);
+    let r;
+    try { r = await sb.functions.invoke(FUNCAO_CARRINHOS, { body: corpo, signal: ctrl.signal }); }
+    catch (e) { r = { error: { name: 'FunctionsFetchError', context: e } }; }
+    finally { clearTimeout(prazo); }
+    if (r.error) {
+      const err = r.error;
+      if (err.name === 'FunctionsFetchError') throw new ErroDados('rede', 'Não foi possível falar com a função "nuvemshop-carrinhos" (rede ou tempo). Confira o histórico de leituras antes de tentar de novo.');
+      if (err.name === 'FunctionsRelayError') throw new ErroDados('rede', 'O Supabase não conseguiu executar a função agora. Tente de novo em alguns minutos.');
+      const status = err.context && typeof err.context.status === 'number' ? err.context.status : null;
+      let codigo = '', nossa = false;
+      try { const c = await err.context.json(); codigo = String((c && (c.codigo || c.code)) || ''); nossa = !!(c && c.funcao === FUNCAO_CARRINHOS); } catch (e) { codigo = ''; }
+      if (status === 404 && !nossa) throw new ErroDados('integracao', 'Função "nuvemshop-carrinhos" não encontrada no Supabase. Confira o nome exato em Edge Functions.', '404');
+      if (status === 401 && !nossa) throw new ErroDados('sessao', 'O Supabase recusou a sessão antes de chegar à função. Em Edge Functions → nuvemshop-carrinhos → Details, desligue "Verify JWT".', '401');
+      const tipo = status === 401 ? 'sessao' : status === 403 ? 'permissao' : status === 409 ? 'conflito' : 'integracao';
+      throw new ErroDados(tipo, MSG_CARRINHOS[codigo] || `A função respondeu com erro${status ? ` (${status})` : ''}${codigo ? ` [${codigo}]` : ''}.`, codigo || (status ? String(status) : ''));
+    }
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.funcao !== FUNCAO_CARRINHOS || typeof d.versao !== 'string')
+      throw new ErroDados('integracao', 'A função "nuvemshop-carrinhos" publicada no Supabase não é a do ALTUM (resposta sem identificação). Em Edge Functions → nuvemshop-carrinhos → Code, substitua TODO o código pelo index.ts da versão 0.15.0 e clique em Deploy.', 'funcao_desconhecida');
+    return d;
+  }
+  const numero = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  /** Painel de carrinhos (todos os perfis com 2 etapas; o banco confere). */
+  async function carrinhosPainel(dias) {
+    const d = await rpc('carrinhos_painel', { p_dias: dias }, 'os carrinhos abandonados');
+    if (!d || typeof d !== 'object' || !d.kpis || !Array.isArray(d.oportunidades))
+      throw new ErroDados('integracao', 'Resposta inesperada do banco. Confira se a migração 021 foi aplicada.');
+    return Object.assign({}, d, { lidoEm: new Date() });
+  }
+  function carrinhosConfigSalvar(janela, cupons) {
+    return rpc('carrinhos_config_salvar', { p_janela: janela, p_cupons: cupons }, 'a configuração dos carrinhos');
+  }
+  /** Lê os carrinhos na Nuvemshop agora (somente leitura). Só contadores voltam ao navegador. */
+  async function carrinhosSincronizar() {
+    const d = await chamarCarrinhos({ acao: 'sincronizar' }, 150000);
+    if (!UUID_RE.test(String(d.execucao || '')) || !d.contadores || typeof d.contadores !== 'object')
+      throw new ErroDados('integracao', 'Resposta incompleta da função "nuvemshop-carrinhos".', 'resposta_incompleta');
+    const c = d.contadores;
+    return { execucao: d.execucao, lidos: numero(c.lidos), novos: numero(c.novos), atualizados: numero(c.atualizados), semEmail: numero(c.sem_email), invalidos: numero(c.invalidos) };
+  }
+  /** Confere se o token da loja lê carrinhos (1 leitura). Só nomes de campos voltam. */
+  async function carrinhosVerificar() {
+    const d = await chamarCarrinhos({ acao: 'verificar' }, 30000);
+    const v = d.verificacao;
+    if (!v || typeof v !== 'object' || typeof v.permitido !== 'boolean') throw new ErroDados('integracao', 'Resposta incompleta da função "nuvemshop-carrinhos".', 'resposta_incompleta');
+    const nomes = l => (Array.isArray(l) ? l.map(String).filter(x => /^[a-z_]{1,40}$/.test(x)) : []);
+    return { permitido: v.permitido, erro: v.erro ? String(v.erro).replace(/[^a-z0-9_]/g, '') : null, mensagem: v.erro ? (MSG_CARRINHOS[v.erro] || v.erro) : null,
+             haCarrinhos: v.ha_carrinhos === true, campos: nomes(v.campos), camposProduto: nomes(v.campos_produto), versao: d.versao };
   }
 
   /** Prévia da recompra por e-mail (só contagens; nada gravado). Só administrador com 2 etapas (o banco confere). */
@@ -1732,6 +1826,10 @@
     nuvemMarketingDescobrirFormato,
     recompraEmailPrevia,
     recompraPainel,
+    carrinhosPainel,
+    carrinhosConfigSalvar,
+    carrinhosSincronizar,
+    carrinhosVerificar,
     recompraSalvarAutomacao,
     recompraAprovar,
     recompraModo,

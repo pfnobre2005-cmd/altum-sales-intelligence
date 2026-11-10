@@ -412,3 +412,7 @@ details.historico summary { cursor: pointer; font-weight: 600; color: var(--ink-
 #secaoAutomacaoRecompra .btn-row { margin-top: 10px; flex-wrap: wrap; }
 #secaoAutomacaoRecompra .lista-simples { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
 #secaoAutomacaoRecompra #recForm { margin: 12px 0; padding: 12px 14px; border: 1px dashed var(--line); border-radius: 12px; }
+/* Carrinhos abandonados (0.15.0) */
+#carRecomendacoes .lista-simples, #carrinhosAdmin .lista-simples { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+#carFonte { margin-bottom: 12px; }
+#carrinhosAdmin .btn-row { margin-top: 10px; flex-wrap: wrap; }
